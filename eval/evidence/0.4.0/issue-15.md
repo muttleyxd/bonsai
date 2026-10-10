@@ -105,7 +105,12 @@ regression, and was re-verified by the four-target run above.
    ordinary runs skip with `surface-qualification: skipping native confinement
    probe`, and `BONSAI_REQUIRE_NATIVE_SANDBOX=1` (set by the runner) turns that
    skip into a hard failure. The runner treats the skip notice as a failed check
-   on every target.
+   on every target. Scope: that probe proves only that the backend can start and
+   map its namespace — the same contract `sandbox::linux::detect_backend`
+   relies on. Enforcement itself is asserted separately by
+   `artifact_confines_native_writes_and_network`, which requires the extracted
+   binary to block the write/symlink/child-process/loopback probes; the probe
+   does not stand in for those assertions.
 3. **P1 — pre-existing: every release build was broken on the current stable.**
    `cc7a576`'s predecessor failed on both Linux jobs with
    `error: use of deprecated method std::sync::atomic::Atomic::<usize>::fetch_update`
