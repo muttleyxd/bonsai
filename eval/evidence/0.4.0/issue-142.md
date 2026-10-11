@@ -169,7 +169,15 @@ The reclaim policy itself is a pure function, covered at the storage layer by
    evidence the session bound. It now records the subscriber's own capture digest
    — the workspace identity that authorized reusing the attempt — which is the
    value the reuse decision was actually made on.
-6. **The shared path polluted `stdout` with merged streams plus the marker.**
+6. **The lane key was derived from the wrong root.** `admit` resolved the
+   artifact directory from the process's own launch directory while the lane
+   recorded the *captured* worktree, so a session started inside a member crate of
+   a Cargo workspace computed a `target/` directory Cargo never writes to, and two
+   sessions at different depths derived different lane keys for one real artifact
+   directory. The directory is now resolved from the captured worktree, and
+   recognition no longer resolves it at all — it is the caller's job once the
+   worktree is known, with an unresolvable strategy still declining coordination.
+7. **The shared path polluted `stdout` with merged streams plus the marker.**
    `with_shared_provenance` replaced the producer's own `stdout` with the combined
    body (stdout+stderr+marker) and the follower path fabricated its `stdout` the
    same way. Read-path extraction reads that field as the command's own output, so
@@ -209,6 +217,26 @@ The reclaim policy itself is a pure function, covered at the storage layer by
   tool with `VerificationSchedulerContext::disabled()`, so eval task timing and
   provider-visible behavior are unchanged by this feature and the eval suites do
   not cover the shared path.
+- **A recycled pid can pin a lane.** Producer liveness is `kill(pid, 0)`, which
+  reports a reused pid as alive. A crashed producer whose pid was recycled is
+  therefore never reclaimed, and every queued attempt in that lane waits out the
+  full 30-minute limit before abandoning. This fails in the safe direction — no
+  second producer ever runs concurrently — but it wastes the wait. A fix needs a
+  process-identity probe beside the pid (start time or boot id), which no current
+  dependency exposes portably.
+- **Linked attempts are retained forever.** `verification_shared_job_links` rows
+  are never expired, and one link permanently exempts its job from retention, so
+  each shared attempt pins up to 200 000 chars of `output_body` in the database.
+  Retention deliberately protects linked evidence, so bounding this means giving
+  links their own window and letting the job expire behind them.
+- **The lane's artifact directory has no scheduler-level regression test.** The
+  directory is now resolved from the captured worktree rather than the process's
+  launch directory, which is what makes two sessions started at different depths
+  of one Cargo workspace share a lane. The nested-cwd property itself is covered
+  by `identity::tests::default_target_directory_is_one_per_worktree`, but the
+  wiring has no end-to-end test because the storage fixture is not a git
+  repository and the capture needs one to observe a worktree above the launch
+  directory.
 - **Build-cache growth is unmanaged by design.** Reusing one target directory
   per worktree means a full disk still degrades builds; the scheduler detects
   nothing about disk pressure and reports the underlying command failure

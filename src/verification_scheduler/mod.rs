@@ -290,9 +290,7 @@ impl VerificationScheduler {
         &self,
         request: &VerificationRunRequest,
     ) -> Result<Option<(VerificationJobRequest, String)>> {
-        let Some(recognized) =
-            identity::recognize(&request.command, &request.cwd, &self.project_root)
-        else {
+        let Some(recognized) = identity::recognize(&request.command) else {
             return Ok(None);
         };
         // Recapture here, before queueing, so a request that is already stale
@@ -306,6 +304,19 @@ impl VerificationScheduler {
         else {
             return Ok(None);
         };
+        // Resolve the artifact directory from the captured worktree rather than
+        // from wherever this process happens to have been launched: a session
+        // started inside a member crate of a Cargo workspace still writes to the
+        // workspace root's `target/`, and two such sessions must derive one lane
+        // key for it. A strategy that cannot be resolved keeps ordinary
+        // execution instead of risking an unscoped lane.
+        let Some(target_directory) = identity::cargo_target_directory(
+            std::path::Path::new(&workspace.worktree_root),
+            &request.cwd,
+        ) else {
+            return Ok(None);
+        };
+        let target_directory = target_directory.to_string_lossy().into_owned();
         let Ok(identity_digest) = workspace.digest() else {
             return Ok(None);
         };
@@ -314,7 +325,7 @@ impl VerificationScheduler {
         let lane = VerificationLane {
             worktree_root: workspace.worktree_root.clone(),
             project_root: workspace.project_root.clone(),
-            target_directory: recognized.target_directory.to_string_lossy().into_owned(),
+            target_directory: target_directory.clone(),
             policy_fingerprint,
             secret_fingerprint: identity::secret_environment_fingerprint(
                 &secret_key,
@@ -718,9 +729,7 @@ impl VerificationScheduler {
         request: &VerificationRunRequest,
         expected_digest: &str,
     ) -> bool {
-        let Some(recognized) =
-            identity::recognize(&request.command, &request.cwd, &self.project_root)
-        else {
+        let Some(recognized) = identity::recognize(&request.command) else {
             return false;
         };
         let Ok(workspace) = crate::agent::capture_verification_workspace_identity(
@@ -897,6 +906,7 @@ impl Drop for SubscriptionGuard {
         }
         let storage = self.storage.clone();
         let (job_id, session_id) = (self.job_id, self.session_id);
+        let session_raw = session_id.as_i64();
         let tool_call_id = self.tool_call_id.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
@@ -907,6 +917,16 @@ impl Drop for SubscriptionGuard {
                     tracing::debug!(job_id, %error, "verification subscription detach failed");
                 }
             });
+        } else {
+            // Dropping without a runtime cannot reach the store, so the
+            // subscriber stays attached and keeps its attempt — and the lane
+            // behind it — alive. That is worth saying out loud rather than
+            // failing silently.
+            tracing::warn!(
+                job_id,
+                session_id = session_raw,
+                "verification subscription could not be detached: no Tokio runtime is available"
+            );
         }
     }
 }

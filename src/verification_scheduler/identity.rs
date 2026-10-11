@@ -34,8 +34,6 @@ pub(crate) struct RecognizedVerificationCommand {
     pub(crate) command: String,
     /// Cargo subcommand, used for status text.
     pub(crate) subcommand: String,
-    /// Canonical artifact directory. Two attempts sharing it must serialize.
-    pub(crate) target_directory: PathBuf,
 }
 
 /// Effective execution policy of one attempt.
@@ -110,12 +108,11 @@ pub(crate) struct StoredVerificationIdentity {
 /// Recognize a command the scheduler may coordinate.
 ///
 /// Returns `None` — ordinary execution — for anything it cannot describe
-/// completely, which is the conservative default.
-pub(crate) fn recognize(
-    command: &str,
-    cwd: &Path,
-    worktree_root: &Path,
-) -> Option<RecognizedVerificationCommand> {
+/// completely, which is the conservative default. The artifact directory is
+/// deliberately *not* resolved here: it must come from the worktree this
+/// attempt was captured in, which the caller learns only after normalizing the
+/// command through this function.
+pub(crate) fn recognize(command: &str) -> Option<RecognizedVerificationCommand> {
     let base = strip_trailing_stderr_merge(command.trim());
     if base.is_empty() || base.contains(SHELL_METACHARACTERS) {
         return None;
@@ -153,11 +150,9 @@ pub(crate) fn recognize(
         }
     }
 
-    let target_directory = cargo_target_directory(worktree_root, cwd)?;
     Some(RecognizedVerificationCommand {
         command: base.to_string(),
         subcommand: subcommand.to_string(),
-        target_directory,
     })
 }
 
@@ -333,8 +328,7 @@ mod tests {
         let temp = root();
         std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
 
-        let recognized = recognize("cargo test --locked", temp.path(), temp.path())
-            .expect("plain cargo test is coordinated");
+        let recognized = recognize("cargo test --locked").expect("plain cargo test is coordinated");
         assert_eq!(recognized.command, "cargo test --locked");
         assert_eq!(recognized.subcommand, "test");
 
@@ -353,7 +347,7 @@ mod tests {
             "cargo test --message-format=json",
         ] {
             assert!(
-                recognize(command, temp.path(), temp.path()).is_none(),
+                recognize(command).is_none(),
                 "{command} must not be coordinated"
             );
         }
@@ -361,12 +355,12 @@ mod tests {
         // A trailing stderr merge is removed rather than rejected, so producer
         // and subscriber agree on one command string.
         assert_eq!(
-            recognize("cargo test --locked 2>&1", temp.path(), temp.path())
+            recognize("cargo test --locked 2>&1")
                 .expect("stderr merge is normalized")
                 .command,
             "cargo test --locked"
         );
-        assert!(recognize("cargo fmt --check", temp.path(), temp.path()).is_some());
+        assert!(recognize("cargo fmt --check").is_some());
     }
 
     #[test]
