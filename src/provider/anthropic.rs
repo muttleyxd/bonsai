@@ -595,8 +595,9 @@ impl AnthropicCompatibleProvider {
         } else {
             transform::ProjectStateWireLayout::SystemTail
         };
+        let contiguous = transform::restore_tool_result_contiguity(messages);
         let wire_messages =
-            transform::messages_for_project_state_layout(messages, project_state_layout);
+            transform::messages_for_project_state_layout(contiguous.as_ref(), project_state_layout);
         // Image safety net: mirror of the OpenAI-chat sanitize — a text-only
         // Anthropic-compatible endpoint rejects image blocks with a 400, an
         // unsupported media type (e.g. `image/svg+xml`) 400s even vision

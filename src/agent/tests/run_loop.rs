@@ -3269,6 +3269,109 @@ async fn nested_steering_is_injected_before_a_planned_mutation_and_requires_retr
     }));
 }
 
+/// Returns an image attachment — the tool-result shape that used to interleave
+/// a `user` message between the results of its own batch.
+struct ImageAttachmentTool;
+
+#[async_trait::async_trait]
+impl Tool for ImageAttachmentTool {
+    fn name(&self) -> &str {
+        "frame"
+    }
+
+    fn description(&self) -> &str {
+        "captures the current frame"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "additionalProperties": false})
+    }
+
+    fn parallel_policy(&self) -> crate::tool::ParallelPolicy {
+        crate::tool::ParallelPolicy::Serialized
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+        Ok(ToolOutput::Image {
+            mime_type: "image/png".to_string(),
+            base64_data: "AAAA".to_string(),
+            description: "frame captured".to_string(),
+        })
+    }
+}
+
+fn message_role(message: &ChatCompletionRequestMessage) -> &'static str {
+    match message {
+        ChatCompletionRequestMessage::System(_) => "system",
+        ChatCompletionRequestMessage::User(_) => "user",
+        ChatCompletionRequestMessage::Assistant(_) => "assistant",
+        ChatCompletionRequestMessage::Tool(_) => "tool",
+        _ => "other",
+    }
+}
+
+#[tokio::test]
+async fn image_tool_results_are_attached_after_the_whole_tool_run() {
+    let fixture = TestFixture::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ImageAttachmentTool));
+
+    // Two serialized batches in one assistant turn, so a per-batch flush would
+    // still leave an attachment between the two tool results.
+    let provider = MockProvider::new(vec![
+        Ok(StreamedResponse {
+            tool_calls: vec![
+                test_tool_call("call-0", "frame", "{}"),
+                test_tool_call("call-1", "frame", "{}"),
+            ],
+            ..StreamedResponse::default()
+        }),
+        Ok(StreamedResponse {
+            content: "done".to_string(),
+            ..StreamedResponse::default()
+        }),
+    ]);
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+
+    let result = agent
+        .run(
+            "capture two frames",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, AgentRunResult::Completed("done".to_string()));
+
+    let requests = requests.lock().await;
+    let second = requests
+        .get(1)
+        .expect("second request should follow the tools");
+    let assistant = second
+        .iter()
+        .position(|message| matches!(message, ChatCompletionRequestMessage::Assistant(_)))
+        .expect("the assistant tool-call turn should be in the request");
+    let roles: Vec<&str> = second[assistant + 1..]
+        .iter()
+        .map(message_role)
+        .take(4)
+        .collect();
+    assert_eq!(
+        roles,
+        ["tool", "tool", "user", "user"],
+        "an image attachment between the tool results 400s every later request"
+    );
+}
+
 #[tokio::test]
 async fn trusted_context_tool_output_is_injected_as_system_message() {
     let fixture = TestFixture::new();

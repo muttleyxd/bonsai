@@ -345,7 +345,20 @@ impl Agent {
             ..
         } = result
         {
-            self.push_message(image_user_message(&mime_type, &base64_data));
+            // Hold the attachment back until the turn's last tool message has
+            // been pushed, instead of attaching it to this result directly.
+            // Providers require an assistant message's `tool_calls` to be
+            // answered by *consecutive* tool messages, so a body of
+            // `tool, user(image), tool` is rejected with "An assistant message
+            // with 'tool_calls' must be followed by tool messages responding
+            // to each 'tool_call_id'". History is
+            // replayed on every later request, one such turn 400s the whole
+            // session permanently: reading two images in one batch used to
+            // wedge a session for good. The flush happens once, after the
+            // batch, in `Agent::execute_tool_calls`.
+            batch
+                .image_messages
+                .push(image_user_message(&mime_type, &base64_data));
         }
         Ok(())
     }

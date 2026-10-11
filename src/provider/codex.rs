@@ -276,8 +276,9 @@ impl CodexProvider {
         // stable `prompt_cache_key` and keep the reusable prefix byte-stable.
         // This backend rejects the public Responses API's
         // `prompt_cache_options` and explicit content breakpoints.
+        let contiguous = transform::restore_tool_result_contiguity(messages);
         let wire_messages = transform::messages_for_project_state_layout(
-            messages,
+            contiguous.as_ref(),
             transform::ProjectStateWireLayout::AppendOnly,
         );
         // Image safety net: mirror of the OpenAI-chat/Anthropic sanitize — an
