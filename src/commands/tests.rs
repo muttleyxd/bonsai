@@ -657,7 +657,7 @@ async fn tasks_command_lists_background_tasks() {
     let mut agent = agent();
     let background_tasks = Arc::new(BackgroundTaskRegistry::new());
     let dir = tempdir().unwrap();
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let shell = crate::util::shell::user_shell();
     let task = background_tasks
         .start(&shell, "printf listed-task", dir.path(), 5)
         .await
@@ -691,7 +691,7 @@ async fn tasks_stop_command_stops_background_task() {
     let mut agent = agent();
     let background_tasks = Arc::new(BackgroundTaskRegistry::new());
     let dir = tempdir().unwrap();
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let shell = crate::util::shell::user_shell();
     let task = background_tasks
         .start(&shell, "sleep 5", dir.path(), 30)
         .await

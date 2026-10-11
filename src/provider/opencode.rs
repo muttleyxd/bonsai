@@ -311,7 +311,9 @@ impl OpenAiCompatibleProvider {
         } else {
             transform::ProjectStateWireLayout::LatestAtEnd
         };
-        let staged = transform::messages_for_project_state_layout(messages, project_state_layout);
+        let contiguous = transform::restore_tool_result_contiguity(messages);
+        let staged =
+            transform::messages_for_project_state_layout(contiguous.as_ref(), project_state_layout);
         // Strict OpenAI-compatible chat templates (Qwen3 and other Jinja
         // templates) reject a `system` message anywhere but index 0. Bonsai
         // injects trusted harness notes (e.g. the self-review nudge) mid-stream
@@ -2120,6 +2122,82 @@ mod tests {
             .unwrap();
 
         assert!(body.to_string().contains("image_url"));
+    }
+
+    #[test]
+    fn request_body_answers_a_tool_call_turn_with_consecutive_tool_messages() {
+        // Regression (observed live in a wedged session): a batch that read two
+        // images replayed as `tool, user(image), tool, user(image)`. DeepSeek
+        // rejected it with "insufficient tool messages following tool_calls
+        // message" — and rejected every later turn of that session too, because
+        // the turn is replayed from history. The wire body must answer the
+        // assistant turn with consecutive tool messages.
+        let session = provider_session("sk", "http://localhost/v1", "deepseek-v4-pro");
+        let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
+        let provider = OpenAiCompatibleProvider::with_api_key_policy(
+            OPENCODE_METADATA.id.as_ref(),
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            PLAIN,
+        );
+        let two_calls = ChatCompletionRequestMessage::Assistant(
+            async_openai::types::chat::ChatCompletionRequestAssistantMessageArgs::default()
+                .content("")
+                .tool_calls(vec![
+                    async_openai::types::chat::ChatCompletionMessageToolCalls::Function(
+                        async_openai::types::chat::ChatCompletionMessageToolCall {
+                            id: "call-0".to_string(),
+                            function: async_openai::types::chat::FunctionCall {
+                                name: "read".to_string(),
+                                arguments: "{}".to_string(),
+                            },
+                        },
+                    ),
+                    async_openai::types::chat::ChatCompletionMessageToolCalls::Function(
+                        async_openai::types::chat::ChatCompletionMessageToolCall {
+                            id: "call-1".to_string(),
+                            function: async_openai::types::chat::FunctionCall {
+                                name: "read".to_string(),
+                                arguments: "{}".to_string(),
+                            },
+                        },
+                    ),
+                ])
+                .build()
+                .unwrap(),
+        );
+
+        let body = provider
+            .request_body(
+                &[
+                    user_message("read both frames"),
+                    two_calls,
+                    tool_result_message("call-0", "Image file: a.png (1 bytes, image/png)"),
+                    image_user_message(),
+                    tool_result_message("call-1", "Image file: b.png (1 bytes, image/png)"),
+                    image_user_message(),
+                ],
+                &[],
+            )
+            .unwrap();
+
+        let messages = body["messages"].as_array().expect("messages array");
+        let roles: Vec<&str> = messages
+            .iter()
+            .filter_map(|message| message.get("role").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "tool", "tool", "user", "user"],
+            "attachments must follow the whole tool-result run"
+        );
+        let result_ids: Vec<&str> = messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .filter_map(|message| message.get("tool_call_id").and_then(Value::as_str))
+            .collect();
+        assert_eq!(result_ids, vec!["call-0", "call-1"]);
     }
 
     #[test]

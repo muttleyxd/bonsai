@@ -1055,8 +1055,10 @@ async fn force_kill_child(child: &mut Child) {
 mod tests {
     use super::*;
 
+    /// Commands run in the shell the suite pins — never the developer's
+    /// interactive shell, whose syntax these POSIX commands do not follow.
     fn shell() -> String {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+        crate::util::shell::user_shell()
     }
 
     #[tokio::test]

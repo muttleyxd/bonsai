@@ -121,6 +121,10 @@ struct QueuedMessageState<'state, 'receiver> {
 
 struct ToolResultBatchContext<'state, 'group> {
     trusted_contexts: &'state mut Vec<String>,
+    /// Image attachments produced by this batch's tool results, held back until
+    /// the turn's last tool message has been pushed — see
+    /// [`Agent::apply_tool_result`].
+    image_messages: &'state mut Vec<ChatCompletionRequestMessage>,
     successful_rust_edits: &'state mut Vec<PathBuf>,
     launch_group_id: Option<&'group str>,
 }
@@ -582,6 +586,7 @@ impl Agent {
         reason: &str,
         sink: &SharedSink,
         trusted_contexts: &mut Vec<String>,
+        image_messages: &mut Vec<ChatCompletionRequestMessage>,
     ) -> Result<()> {
         for call in &skipped_calls {
             sink.tool_started(&call.id, &call.name, &call.arguments);
@@ -596,6 +601,7 @@ impl Agent {
                 sink,
                 ToolResultBatchContext {
                     trusted_contexts,
+                    image_messages,
                     successful_rust_edits: &mut skipped_rust_edits,
                     launch_group_id: None,
                 },
@@ -658,6 +664,7 @@ impl Agent {
         }
         let mut batches = planned_batches.into_iter().peekable();
         let mut trusted_contexts = Vec::new();
+        let mut image_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
         let mut scoped_contexts = Vec::new();
         let mut changed_scoped_steering = HashSet::new();
         let launch_group_id = tool_calls
@@ -938,6 +945,7 @@ impl Agent {
                     sink,
                     ToolResultBatchContext {
                         trusted_contexts: &mut trusted_contexts,
+                        image_messages: &mut image_messages,
                         successful_rust_edits: &mut successful_rust_edits,
                         launch_group_id: launch_group_id.as_deref(),
                     },
@@ -988,6 +996,7 @@ impl Agent {
                     "Tool skipped because the agent entered a nonterminal peer wait.",
                     sink,
                     &mut trusted_contexts,
+                    &mut image_messages,
                 )
                 .await?;
                 self.emit_context_updated(sink);
@@ -1003,6 +1012,7 @@ impl Agent {
                         "Tool skipped because a new queued user message took priority.",
                         sink,
                         &mut trusted_contexts,
+                        &mut image_messages,
                     )
                     .await?;
                     for message in queued {
@@ -1017,13 +1027,24 @@ impl Agent {
                 }
             }
         }
-        if !trusted_contexts.is_empty() || !scoped_contexts.is_empty() {
+        // Deferred attachments land only once the turn's last tool message is
+        // in history: an image message between two tool results breaks the
+        // assistant `tool_calls` ↔ tool-message run every provider requires.
+        // Trusted-context notes are deferred for the same reason.
+        let deferred_images = !image_messages.is_empty();
+        for message in image_messages {
+            self.push_message(message);
+        }
+        let deferred_contexts = !trusted_contexts.is_empty() || !scoped_contexts.is_empty();
+        if deferred_contexts {
             for content in trusted_contexts {
                 self.push_message(trusted_context_message(&content));
             }
             for content in scoped_contexts {
                 self.push_message(scoped_steering_message(&content));
             }
+        }
+        if deferred_images || deferred_contexts {
             self.emit_context_updated(sink);
         }
         outcome.interrupted_mid_tools = interrupted_mid_tools;

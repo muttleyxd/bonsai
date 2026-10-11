@@ -11,11 +11,12 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use async_openai::types::chat::{
-    ChatCompletionRequestDeveloperMessage, ChatCompletionRequestDeveloperMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartText,
-    ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
-    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
+    ChatCompletionMessageToolCalls, ChatCompletionRequestDeveloperMessage,
+    ChatCompletionRequestDeveloperMessageContent, ChatCompletionRequestMessage,
+    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
+    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+    ChatCompletionTool,
 };
 use serde_json::{Value, json};
 
@@ -359,6 +360,136 @@ fn framed_demoted_system_text(name: Option<&str>, text: &str) -> String {
     format!(
         "[Bonsai {source} — not a user request; explicit human messages set task intent]\n{text}"
     )
+}
+
+/// The tool-call ids an assistant message owes results for, or `None` when the
+/// message does not open a tool-call run.
+fn assistant_tool_call_ids(message: &ChatCompletionRequestMessage) -> Option<Vec<String>> {
+    let ChatCompletionRequestMessage::Assistant(assistant) = message else {
+        return None;
+    };
+    let tool_calls = assistant.tool_calls.as_ref()?;
+    let ids = tool_calls
+        .iter()
+        .map(|tool_call| match tool_call {
+            ChatCompletionMessageToolCalls::Function(call) => call.id.clone(),
+            ChatCompletionMessageToolCalls::Custom(call) => call.id.clone(),
+        })
+        .collect::<Vec<_>>();
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// The `tool_call_id` a tool message answers, or `None` for any other role.
+fn tool_result_call_id(message: &ChatCompletionRequestMessage) -> Option<&str> {
+    match message {
+        ChatCompletionRequestMessage::Tool(tool) => Some(tool.tool_call_id.as_str()),
+        _ => None,
+    }
+}
+
+/// Spans `(head, end)` of assistant tool-call runs with conversational text
+/// interleaved before their last tool result. `end` is exclusive.
+///
+/// A following assistant turn, a legacy `function` result, or a tool result for
+/// another turn ends a run without marking it: those mean the run's ids were
+/// never answered, which is a different fault from a wedged message.
+fn interleaved_tool_result_spans(messages: &[ChatCompletionRequestMessage]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index < messages.len() {
+        let Some(ids) = assistant_tool_call_ids(&messages[index]) else {
+            index += 1;
+            continue;
+        };
+        let head = index;
+        let mut outstanding = ids;
+        let mut interleaved = false;
+        index += 1;
+        while index < messages.len() && !outstanding.is_empty() {
+            match &messages[index] {
+                ChatCompletionRequestMessage::Tool(tool) => {
+                    // A result for a different turn ends this run: the missing
+                    // ids were never answered and are not ours to reorder.
+                    let Some(position) = outstanding
+                        .iter()
+                        .position(|owed| owed == &tool.tool_call_id)
+                    else {
+                        break;
+                    };
+                    outstanding.remove(position);
+                }
+                // A new assistant turn cannot answer this run either, and is
+                // not a message wedged into it.
+                ChatCompletionRequestMessage::Assistant(_)
+                | ChatCompletionRequestMessage::Function(_) => break,
+                // Conversational text inside the run is what 400s.
+                _ => interleaved = true,
+            }
+            index += 1;
+        }
+        if interleaved {
+            spans.push((head, index));
+        }
+    }
+    spans
+}
+
+/// Move messages that were interleaved between an assistant message's tool
+/// results to just after the run's last tool result.
+///
+/// Every wire target requires an assistant message's `tool_calls` to be
+/// answered by *consecutive* tool messages. DeepSeek and OpenAI-compatible
+/// gateways reject `tool, user(image), tool` with "An assistant message with
+/// 'tool_calls' must be followed by tool messages responding to each
+/// 'tool_call_id'. (insufficient tool messages following tool_calls message)",
+/// and every later request of the session repeats it, because the turn is
+/// replayed from history — the session never recovers on its own.
+///
+/// Bonsai produced exactly that shape: an image tool result pushed its base64
+/// attachment as a `user` message immediately after its own tool message, so
+/// any image returned by a call that was not the last one in its batch landed
+/// between tool results. The producer is fixed; this repairs histories that
+/// were already written that way, so a wedged session sends again.
+///
+/// Returns `Borrowed` when every run is already contiguous and writes no new
+/// message, keeping the wire body — and therefore the provider's cache prefix —
+/// byte-identical.
+pub(crate) fn restore_tool_result_contiguity(
+    messages: &[ChatCompletionRequestMessage],
+) -> Cow<'_, [ChatCompletionRequestMessage]> {
+    let spans = interleaved_tool_result_spans(messages);
+    if spans.is_empty() {
+        return Cow::Borrowed(messages);
+    }
+    let mut ordered = Vec::with_capacity(messages.len());
+    let mut spans = spans.into_iter().peekable();
+    let mut index = 0;
+    while index < messages.len() {
+        let span_end = match spans.peek() {
+            Some((head, end)) if *head == index => Some(*end),
+            _ => None,
+        };
+        let Some(end) = span_end else {
+            ordered.push(messages[index].clone());
+            index += 1;
+            continue;
+        };
+        spans.next();
+        ordered.push(messages[index].clone());
+        // Tool results keep answering their run in order; everything that was
+        // wedged between them follows, still in its original order.
+        let mut interleaved = Vec::new();
+        for message in &messages[index + 1..end] {
+            if tool_result_call_id(message).is_some() {
+                ordered.push(message.clone());
+            } else {
+                interleaved.push(message.clone());
+            }
+        }
+        ordered.extend(interleaved);
+        index = end;
+    }
+    Cow::Owned(ordered)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -719,7 +850,9 @@ pub(crate) fn endpoint_url(base_url: &str, endpoint_path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::test_utils::{named_user_message, system_message, user_message};
+    use crate::provider::test_utils::{
+        named_user_message, system_message, tool_call_message, tool_result_message, user_message,
+    };
 
     #[test]
     fn endpoint_url_trims_trailing_and_leading_slashes() {
@@ -938,6 +1071,128 @@ mod tests {
             ]),
             name: name.map(str::to_string),
         })
+    }
+
+    /// An assistant turn that is answered by several parallel tool calls.
+    fn parallel_tool_call_message(call_ids: &[&str]) -> ChatCompletionRequestMessage {
+        use async_openai::types::chat::{
+            ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
+            ChatCompletionRequestAssistantMessageArgs, FunctionCall,
+        };
+        ChatCompletionRequestMessage::Assistant(
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content("")
+                .tool_calls(
+                    call_ids
+                        .iter()
+                        .map(|id| {
+                            ChatCompletionMessageToolCalls::Function(
+                                ChatCompletionMessageToolCall {
+                                    id: (*id).to_string(),
+                                    function: FunctionCall {
+                                        name: "read".to_string(),
+                                        arguments: "{}".to_string(),
+                                    },
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .build()
+                .expect("assistant tool-call message should build"),
+        )
+    }
+
+    fn message_roles(messages: &[ChatCompletionRequestMessage]) -> Vec<&'static str> {
+        messages
+            .iter()
+            .map(|message| match message {
+                ChatCompletionRequestMessage::System(_) => "system",
+                ChatCompletionRequestMessage::User(_) => "user",
+                ChatCompletionRequestMessage::Assistant(_) => "assistant",
+                ChatCompletionRequestMessage::Tool(_) => "tool",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tool_result_contiguity_borrows_when_every_run_is_contiguous() {
+        // Both attachments trail the last tool result — the shape the producer
+        // writes now, and why the common wire body stays byte-stable.
+        let messages = vec![
+            system_message("sys"),
+            parallel_tool_call_message(&["call-0", "call-1"]),
+            tool_result_message("call-0", "first"),
+            tool_result_message("call-1", "second"),
+            image_user_message(Some("bonsai_user")),
+            image_user_message(Some("bonsai_user")),
+            user_message("next"),
+        ];
+        assert!(matches!(
+            restore_tool_result_contiguity(&messages),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn tool_result_contiguity_leaves_separate_tool_call_turns_alone() {
+        // Two assistant turns answered by results in one later run — the shape
+        // Anthropic's rolling-history merge writes. The second turn is a
+        // boundary, not a message wedged into the first, so rewriting it would
+        // change wire bytes for a history that is already valid.
+        let messages = vec![
+            user_message("read both"),
+            tool_call_message("call-1", "read", "{}"),
+            tool_call_message("call-2", "read", "{}"),
+            tool_result_message("call-1", "one"),
+            tool_result_message("call-2", "two"),
+        ];
+        assert!(matches!(
+            restore_tool_result_contiguity(&messages),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn tool_result_contiguity_moves_interleaved_messages_after_the_run() {
+        // The shape Bonsai used to write when one batch read two images:
+        // `assistant(tool_calls), tool, user(image), tool, user(image)`.
+        // DeepSeek and the OpenAI-compatible gateways reject it, and every
+        // later turn of the session with it.
+        let messages = vec![
+            system_message("sys"),
+            parallel_tool_call_message(&["call-0", "call-1"]),
+            tool_result_message("call-0", "Image file: a.png"),
+            image_user_message(Some("bonsai_user")),
+            tool_result_message("call-1", "Image file: b.png"),
+            image_user_message(Some("bonsai_user")),
+            user_message("next"),
+        ];
+
+        let repaired = restore_tool_result_contiguity(&messages);
+
+        assert_eq!(
+            message_roles(&repaired),
+            [
+                "system",
+                "assistant",
+                "tool",
+                "tool",
+                "user",
+                "user",
+                "user"
+            ]
+        );
+        assert_eq!(
+            repaired[2..4]
+                .iter()
+                .map(|message| tool_result_call_id(message).unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["call-0", "call-1"],
+            "results keep answering their own calls, in order"
+        );
+        assert_eq!(repaired[6], messages[6], "later turns are untouched");
     }
 
     #[test]
