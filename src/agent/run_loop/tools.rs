@@ -316,3 +316,15 @@ impl Agent {
         (tool_call, result, status)
     }
 }
+
+/// Whether one planned call is a delegation (`agent`/`task`).
+///
+/// The batcher serializes delegations, and the run loop attributes a
+/// delegation-only batch to the child lane instead of the tool lane. Both
+/// decisions read the tool's own declared effect policy through this one
+/// predicate so they cannot drift apart.
+pub(super) fn is_delegation_call(tool_registry: &ToolRegistry, tool_call: &ToolCall) -> bool {
+    tool_registry
+        .get(&tool_call.name)
+        .is_some_and(|tool| tool.effect_policy() == crate::tool::ToolEffectPolicy::Delegated)
+}

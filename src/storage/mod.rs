@@ -58,6 +58,7 @@ mod task_runs;
 pub(crate) mod test_utils;
 #[cfg(test)]
 mod tests;
+mod timing;
 mod todos;
 mod transcript;
 mod usage_stats;
@@ -82,6 +83,7 @@ pub use permissions::{PermissionScope, RuleKind, StoredPermissionRule};
 pub(crate) use recovery::{NewRecoveryPoint, RecoveryId, RecoveryPoint, RecoveryState};
 pub use session_kind::{SessionKind, SessionListScope};
 pub use task_runs::{TaskOutcome, TaskRun, TaskRunId, TaskTerminalReason, TaskTerminalReasonCode};
+pub(crate) use timing::TaskRunTiming;
 pub use usage_stats::{
     DailyUsage, LocalToday, ModelUsage, QualityEvidenceIntegrity, UsageDashboard,
 };

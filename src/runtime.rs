@@ -191,6 +191,15 @@ impl RuntimeBuilder {
             system_prompt_suffix,
             workspace_trust,
         } = self.request;
+        // One ledger per runtime, shared by the agent (model, tool, and child
+        // work) and the interaction service (permission and user waits), so both
+        // halves of a run's elapsed time land in the same account. The
+        // interaction service is rebuilt around the same shared channel state,
+        // before any tool captures it.
+        let timing: crate::timing::SharedTimingLedger = Arc::new(
+            crate::timing::TimingLedger::system(crate::timing::TimingPolicy::from_env()),
+        );
+        let interaction = Arc::new(interaction.as_ref().clone().with_timing(timing.clone()));
         let capabilities = surface.capabilities();
         validate_session_binding(surface, capabilities.session_binding, current_session_id)?;
         let smol_preference = storage.smol_preference().await?;
@@ -467,6 +476,7 @@ impl RuntimeBuilder {
             agent_builder = agent_builder.episode_store(episode_store);
         }
         let mut agent = agent_builder.build()?;
+        agent.set_timing_ledger(timing.clone());
         if surface == SurfaceKind::Headless {
             agent.set_mode(AgentMode::Coding);
         }

@@ -4,6 +4,8 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::timing::{SharedTimingLedger, TimingCategory, TimingLane, TimingSpan};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuestionOption {
     pub label: String,
@@ -158,6 +160,13 @@ pub struct InteractionService {
     sender: mpsc::UnboundedSender<InteractionRequest>,
     pending: Arc<Mutex<PendingState>>,
     noninteractive: bool,
+    /// The active run's timing ledger, when it has one.
+    ///
+    /// Every interactive prompt passes through here, whichever tool asked for
+    /// it, so this is the one place that can report *what the run was waiting
+    /// for* rather than only how long the tool call took. Without it, an
+    /// unanswered permission prompt looks like an active tool process.
+    timing: Option<SharedTimingLedger>,
 }
 
 #[derive(Default)]
@@ -185,6 +194,7 @@ impl InteractionService {
                 sender: tx,
                 pending: Arc::new(Mutex::new(PendingState::default())),
                 noninteractive: false,
+                timing: None,
             },
             rx,
         )
@@ -196,6 +206,56 @@ impl InteractionService {
             sender: tx,
             pending: Arc::new(Mutex::new(PendingState::default())),
             noninteractive: true,
+            timing: None,
+        }
+    }
+
+    /// Attach the active run's ledger so prompts record their own wait.
+    #[must_use]
+    pub fn with_timing(mut self, timing: SharedTimingLedger) -> Self {
+        self.timing = Some(timing);
+        self
+    }
+
+    /// Category and bounded labels for one prompt's wait interval.
+    fn wait_labels(request: &InteractionRequest) -> (TimingCategory, &'static str, &str) {
+        match request {
+            InteractionRequest::Permission { command, .. }
+            | InteractionRequest::SandboxEscalation { command, .. } => {
+                (TimingCategory::PermissionWait, "permission", command)
+            }
+            InteractionRequest::WebDomain { host, .. } => {
+                (TimingCategory::PermissionWait, "web domain", host)
+            }
+            InteractionRequest::ExtensionTool { id, .. } => {
+                (TimingCategory::PermissionWait, "extension tool", id)
+            }
+            InteractionRequest::HookTrust { name, .. } => {
+                (TimingCategory::PermissionWait, "hook trust", name)
+            }
+            InteractionRequest::Question { prompt, .. } => {
+                (TimingCategory::UserWait, "question", prompt)
+            }
+        }
+    }
+
+    /// Open a wait interval for a prompt that has just been delivered.
+    ///
+    /// Waits are attributed to the parent lane. A delegated child shares this
+    /// service and the run's ledger, so a child's prompt currently lands in the
+    /// parent's wait total; separating that needs the child's lane to travel
+    /// with the request, which today it does not.
+    fn begin_wait(&self, request: &InteractionRequest) -> Option<TimingSpan> {
+        let ledger = self.timing.as_ref()?;
+        let (category, owner, reason) = Self::wait_labels(request);
+        Some(ledger.begin(category, TimingLane::Parent, Some(owner), Some(reason)))
+    }
+
+    /// Close a wait interval. Closing twice is a no-op, so a cancelled prompt
+    /// and its responder cannot both count the same wait.
+    fn end_wait(&self, span: TimingSpan) {
+        if let Some(ledger) = self.timing.as_ref() {
+            ledger.end(span);
         }
     }
 
@@ -241,11 +301,15 @@ impl InteractionService {
         let request = build(request_id);
         pending.responders.insert(request_id, tx);
         drop(pending);
-        if self.sender.send(request).is_err() {
+        // From here the user has been asked and the run is blocked until they
+        // answer, cancel, or the prompt dies with the UI. That whole stretch is
+        // one wait interval, attributed to the prompt rather than to the tool
+        // call that asked for it.
+        let wait = self.begin_wait(&request);
+        let outcome = if self.sender.send(request).is_err() {
             self.remove_pending(request_id).await;
-            return Err(InteractionStatus::Cancelled);
-        }
-        if let Some(cancellation_token) = cancellation_token {
+            Err(InteractionStatus::Cancelled)
+        } else if let Some(cancellation_token) = cancellation_token {
             tokio::select! {
                 outcome = rx => match outcome {
                     Ok(outcome) => Ok(outcome),
@@ -267,7 +331,11 @@ impl InteractionService {
                     Err(InteractionStatus::Cancelled)
                 }
             }
+        };
+        if let Some(span) = wait {
+            self.end_wait(span);
         }
+        outcome
     }
 
     async fn remove_pending(&self, request_id: u64) {
@@ -294,6 +362,54 @@ impl InteractionService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn permission_waits_are_recorded_on_the_run_ledger() {
+        let ledger: crate::timing::SharedTimingLedger = std::sync::Arc::new(
+            crate::timing::TimingLedger::system(crate::timing::TimingPolicy::ActiveCompute),
+        );
+        let (service, mut rx) = InteractionService::new();
+        let service = service.with_timing(ledger.clone());
+        let prompt = tokio::spawn({
+            let service = service.clone();
+            async move {
+                service
+                    .request(|id| InteractionRequest::Permission {
+                        request_id: id,
+                        command: "rm -rf /tmp/x".to_string(),
+                        origin: None,
+                    })
+                    .await
+            }
+        });
+        let request = rx.recv().await.expect("request");
+        let request_id = match &request {
+            InteractionRequest::Permission { request_id, .. } => *request_id,
+            _ => panic!("expected permission request"),
+        };
+        assert!(
+            service
+                .respond(
+                    request_id,
+                    InteractionOutcome::Permission(PermissionDecision::AllowOnce),
+                )
+                .await
+                .is_ok()
+        );
+        prompt.await.expect("join").expect("ok");
+
+        // The prompt is a wait, not work: it is counted once, closed, and kept
+        // out of the active-compute clock a budget consumes.
+        let snapshot = ledger.snapshot();
+        assert_eq!(snapshot.categories.len(), 1);
+        let row = &snapshot.categories[0];
+        assert_eq!(row.category, crate::timing::TimingCategory::PermissionWait);
+        assert_eq!(row.interval_count, 1);
+        assert_eq!(row.open_count, 0);
+        assert_eq!(row.latest_owner.as_deref(), Some("permission"));
+        assert_eq!(snapshot.active_compute_ms, 0);
+        assert_eq!(snapshot.open_interval_count, 0);
+    }
 
     #[tokio::test]
     async fn permission_prompt_returns_decision() {

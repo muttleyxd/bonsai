@@ -544,6 +544,7 @@ mod tests {
 
     fn sample_final() -> HeadlessFinalOutput {
         HeadlessFinalOutput {
+            timing: None,
             status: HeadlessStatus::Completed,
             session_lifecycle: "completed".to_string(),
             task_outcome: crate::storage::TaskOutcome::Succeeded,

@@ -65,6 +65,7 @@ use crate::self_review::{
     SelfReviewRunRecord, SelfReviewRunStatus, SelfReviewScope,
 };
 use crate::terminal::TerminalRegistry;
+use crate::timing::SharedTimingLedger;
 use crate::todo::{SharedTodoStore, TodoItem};
 use crate::tool::read_evidence::{
     DelegatedReadEvidence, InspectionEventRecord, InspectionOutcome, InspectionReason,
@@ -520,6 +521,12 @@ pub struct Agent {
     run_start_dirty_paths: Option<BTreeSet<String>>,
     /// Real token usage and provider-priced cost, last-turn and session totals.
     usage: SessionUsage,
+    /// Typed intervals for the active task run: what the run spent its time on,
+    /// and what it spent it waiting for.
+    ///
+    /// The runtime creates it so the interaction service can report prompt
+    /// waits on the same ledger the agent reports model and tool work on.
+    timing: SharedTimingLedger,
     /// Identity of the active provider/model, stamped onto each usage turn for
     /// per-model analytics. `None` in tests and evals that build a provider
     /// without a run selection.
@@ -1939,6 +1946,7 @@ mod run_loop_executor;
 pub(crate) use run_loop_executor::capture_verification_workspace_identity;
 mod self_review;
 mod text;
+mod timing;
 mod transcript;
 mod types;
 mod usage_ledger;

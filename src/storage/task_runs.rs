@@ -517,7 +517,7 @@ pub(super) fn latest_task_run_from_session_row(
     }))
 }
 
-fn bounded_redacted_text(value: &str, max_chars: usize) -> String {
+pub(super) fn bounded_redacted_text(value: &str, max_chars: usize) -> String {
     crate::redact::redact(value)
         .split_whitespace()
         .collect::<Vec<_>>()

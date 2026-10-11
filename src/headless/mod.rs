@@ -187,6 +187,63 @@ fn classify_headless_status(
     }
 }
 
+/// One-line runtime breakdown for the run's status output.
+///
+/// Category and policy names come from the same enums the ledger records, so a
+/// new category cannot be reported under a stale or invented label.
+fn timing_summary(timing: &crate::storage::TaskRunTiming) -> String {
+    let mut parts: Vec<String> = timing
+        .categories
+        .iter()
+        .map(|row| {
+            format!(
+                "{} {} {}ms",
+                row.category.label(),
+                row.lane.label(),
+                row.summed_ms
+            )
+        })
+        .collect();
+    if parts.is_empty() {
+        parts.push("no intervals recorded".to_string());
+    }
+    format!(
+        "timing ({}): critical path {}ms, active compute {}ms, waiting {}ms | {}",
+        timing
+            .policy
+            .map_or("unrecorded", crate::timing::TimingPolicy::label),
+        timing.critical_path_ms,
+        timing.active_compute_ms,
+        timing.waiting_ms,
+        parts.join(", ")
+    )
+}
+
+/// Persist the run's typed timing before its task row becomes terminal.
+///
+/// A write failure is logged, never fatal: the task outcome is the primary
+/// evidence and the runtime breakdown is diagnostic.
+async fn persist_task_timing(
+    storage: &Storage,
+    agent: &Agent,
+    task_run_id: crate::storage::TaskRunId,
+) {
+    let checkpoint = agent.take_timing_checkpoint();
+    if checkpoint.is_empty() {
+        return;
+    }
+    if let Err(error) = storage
+        .checkpoint_task_run_timing(task_run_id, &checkpoint)
+        .await
+    {
+        tracing::warn!(
+            task_run_id = %task_run_id,
+            error = %format!("{error:#}"),
+            "failed to persist task timing"
+        );
+    }
+}
+
 async fn finish_headless_task(
     storage: &Storage,
     task_run_id: crate::storage::TaskRunId,
@@ -751,6 +808,21 @@ async fn run_inner_with_provider_runtime(
 
     sink.begin_completion_run();
     sink.user_message(&prompt);
+    // The run clock starts at the run, not at agent construction: one agent
+    // serves every task run of the session.
+    agent.begin_timing_run();
+    // A previous process may have died mid-interval. Its intervals are closed
+    // here, once, before this run starts recording its own.
+    if let Err(error) = storage
+        .reconcile_open_task_run_timings(current_session_id)
+        .await
+    {
+        tracing::warn!(
+            session_id = %current_session_id,
+            error = %format!("{error:#}"),
+            "failed to reconcile abandoned task timing"
+        );
+    }
     let run_result = if let Some(exhaustion) = preflight_exhaustion {
         Err(anyhow::Error::new(exhaustion))
     } else if let Some(workflow) = verification {
@@ -857,6 +929,7 @@ async fn run_inner_with_provider_runtime(
                 crate::storage::TaskTerminalReasonCode::ExecutionFailure,
                 &failure,
             );
+            persist_task_timing(&storage, &agent, task_run.id).await;
             let task_persistence_result = storage
                 .finish_task_run(
                     task_run.id,
@@ -913,6 +986,7 @@ async fn run_inner_with_provider_runtime(
                 };
                 let terminal_reason =
                     crate::storage::TaskTerminalReason::new(reason_code, &agent_failure);
+                persist_task_timing(&storage, &agent, task_run.id).await;
                 let task_persistence_result = storage
                     .finish_task_run(
                         task_run.id,
@@ -1009,6 +1083,7 @@ async fn run_inner_with_provider_runtime(
             budget_exhaustion,
         },
     );
+    persist_task_timing(&storage, &agent, task_run.id).await;
     let finished_task = finish_headless_task(
         &storage,
         task_run.id,
@@ -1026,6 +1101,20 @@ async fn run_inner_with_provider_runtime(
             finished_task.id
         ))
     })?;
+    let run_timing = match storage.task_run_timing(finished_task.id).await {
+        Ok(timing) => timing,
+        Err(error) => {
+            tracing::warn!(
+                task_run_id = %finished_task.id,
+                error = %format!("{error:#}"),
+                "failed to load headless task timing"
+            );
+            None
+        }
+    };
+    if let Some(timing) = run_timing.as_ref() {
+        sink.status(&timing_summary(timing));
+    }
     let mut final_output = HeadlessFinalOutput {
         status,
         session_lifecycle: status.storage_status().as_db_str().to_string(),
@@ -1040,6 +1129,7 @@ async fn run_inner_with_provider_runtime(
         budget_exhaustion,
         verification,
         completion_report,
+        timing: run_timing.as_ref().map(HeadlessTiming::from),
     };
     sink.record_completion_report(&final_output.completion_report);
     let persistence_started_at = Instant::now();
@@ -1587,6 +1677,68 @@ pub(crate) struct HeadlessFinalOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<crate::verification::VerificationRunRecord>,
     pub completion_report: crate::completion_report::CompletionReport,
+    /// Typed runtime breakdown of the finished task run (issue #146): what the
+    /// run spent its time on, and what it spent it waiting for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timing: Option<HeadlessTiming>,
+}
+
+/// The persisted runtime breakdown of one task run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct HeadlessTiming {
+    /// Clock the run's budgets consumed: `active_compute` or `wall_clock`.
+    /// `unrecorded` when the run never reached a timing checkpoint.
+    pub policy: String,
+    /// Run clock elapsed across every recorded segment.
+    pub wall_ms: i64,
+    /// Union of every interval: what the run actually took, without double
+    /// counting concurrent work.
+    pub critical_path_ms: i64,
+    pub active_compute_ms: i64,
+    pub waiting_ms: i64,
+    /// Per-category resource time. Concurrent work appears in full in each
+    /// category, so these can sum to more than the critical path.
+    pub categories: Vec<HeadlessTimingCategory>,
+    /// Intervals restart reconciliation had to abandon. Their duration is
+    /// unknown, so it is left out of the totals instead of invented.
+    pub recovered_intervals: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct HeadlessTimingCategory {
+    pub category: String,
+    pub lane: String,
+    pub summed_ms: i64,
+    pub interval_count: u32,
+    /// Intervals still open at the last checkpoint.
+    pub open_count: u32,
+}
+
+impl From<&crate::storage::TaskRunTiming> for HeadlessTiming {
+    fn from(timing: &crate::storage::TaskRunTiming) -> Self {
+        Self {
+            policy: timing.policy.map_or_else(
+                || "unrecorded".to_string(),
+                |policy| policy.as_db_str().to_string(),
+            ),
+            wall_ms: timing.wall_ms,
+            critical_path_ms: timing.critical_path_ms,
+            active_compute_ms: timing.active_compute_ms,
+            waiting_ms: timing.waiting_ms,
+            categories: timing
+                .categories
+                .iter()
+                .map(|row| HeadlessTimingCategory {
+                    category: row.category.as_db_str().to_string(),
+                    lane: row.lane.as_db_str().to_string(),
+                    summed_ms: row.summed_ms,
+                    interval_count: row.interval_count,
+                    open_count: row.open_count,
+                })
+                .collect(),
+            recovered_intervals: timing.recovered_interval_count,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

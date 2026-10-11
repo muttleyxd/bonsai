@@ -439,6 +439,17 @@ impl Agent {
         sink.thinking("Calling model");
         self.log_request(&request_messages, tool_schema.tools());
         let provider_started_at = std::time::Instant::now();
+        // Everything from here to the end of the response handling is model
+        // work: retries inside the helper and the low-effort second stream
+        // below both belong to this one interval.
+        let model_span = self.timing.begin(
+            crate::timing::TimingCategory::ModelRequest,
+            crate::timing::TimingLane::Parent,
+            self.active_model_identity
+                .as_ref()
+                .map(|identity| identity.model.as_str()),
+            None,
+        );
         let (provider_sink, first_output) = PerfSink::shared(sink.clone());
         let verification_reasoning = self.verification_reasoning_for_request();
         let request_options = verification_reasoning
@@ -474,6 +485,7 @@ impl Agent {
                     .unwrap_or_else(|| self.provider.reasoning());
                 self.record_usage_details(None, false, None, 0, attempts, effective_reasoning);
                 self.clear_drop_next_turn_controls();
+                self.timing.end(model_span);
                 return Err(err);
             }
         };
@@ -534,6 +546,7 @@ impl Agent {
         self.caches.last_perf_report =
             Some(self.build_perf_report(preflight, provider, tool_schema, &request_messages));
         self.clear_drop_next_turn_controls();
+        self.timing.end(model_span);
 
         self.record_streamed_usage(&response, attempts, effective_reasoning);
         if let Some(warning) = self.new_cache_warning() {
@@ -761,15 +774,41 @@ impl Agent {
             } else {
                 None
             };
-            let delegated_baseline = if batch.iter().any(|tool_call| {
-                tool_registry.get(&tool_call.name).is_some_and(|tool| {
-                    tool.effect_policy() == crate::tool::ToolEffectPolicy::Delegated
-                })
-            }) {
+            let delegated_baseline = if batch
+                .iter()
+                .any(|call| tools::is_delegation_call(tool_registry, call))
+            {
                 capture_worktree_snapshot(&self.project_root).await
             } else {
                 None
             };
+            // A batch made only of delegations is child work, not a tool
+            // process: the parent is waiting on agents that are themselves
+            // spending tokens, so the interval counts as active compute and is
+            // attributed to the child lane.
+            let delegated_only = !batch.is_empty()
+                && batch
+                    .iter()
+                    .all(|call| tools::is_delegation_call(tool_registry, call));
+            let batch_owner = batch
+                .iter()
+                .map(|tool_call| tool_call.name.as_str())
+                .collect::<Vec<_>>()
+                .join("+");
+            let batch_span = self.timing.begin(
+                if delegated_only {
+                    crate::timing::TimingCategory::ChildActive
+                } else {
+                    crate::timing::TimingCategory::ToolActive
+                },
+                if delegated_only {
+                    crate::timing::TimingLane::Child
+                } else {
+                    crate::timing::TimingLane::Parent
+                },
+                Some(&batch_owner),
+                None,
+            );
             let batch_width = batch.len();
             let batch_started = std::time::Instant::now();
             let remaining_billed_tokens = self.budget.max_session_billed_tokens.and_then(|limit| {
@@ -814,6 +853,7 @@ impl Agent {
                         .count(),
                 );
             }
+            self.timing.end(batch_span);
             tracing::debug!(
                 target: "bonsai::batching",
                 width = batch_width,

@@ -52,6 +52,7 @@ mod subagent;
 mod symbol;
 mod task_intent;
 mod terminal;
+mod timing;
 mod todo;
 mod tool;
 mod tui;

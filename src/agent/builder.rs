@@ -243,6 +243,9 @@ impl Agent {
             refresh_volatile: false,
             run_start_dirty_paths: None,
             usage: SessionUsage::default(),
+            timing: Arc::new(crate::timing::TimingLedger::system(
+                crate::timing::TimingPolicy::from_env(),
+            )),
             active_model_identity: builder.active_model_identity,
             execution_lane: builder.execution_lane,
             retry_backoff: RetryBackoff::Exponential,

@@ -390,6 +390,14 @@ impl TaskController {
                 }
             };
             *spawned_task_run_id.lock().await = task_run_id;
+            // Re-anchor the run clock before the run future takes the agent lock:
+            // one agent serves every task run of the session, so a run must not
+            // inherit the previous run's intervals — and because a checkpoint is
+            // the only thing that consumes them, a session that never re-anchored
+            // would keep them for the whole process lifetime.
+            if let Some(context) = completion.as_ref() {
+                context.agent.lock().await.begin_timing_run();
+            }
             let completion_baseline = match completion.as_ref() {
                 Some(context) => {
                     context.sink.begin_completion_run();
@@ -572,6 +580,12 @@ impl TaskController {
                 }
                 completion_report = Some(report);
             }
+            persist_task_timing(
+                session_runtime_budget.as_ref(),
+                completion.as_ref(),
+                task_run_id,
+            )
+            .await;
             if let Err(err) = finish_task_for_outcome(
                 session_runtime_budget.as_ref(),
                 task_run_id,
@@ -1420,6 +1434,38 @@ async fn attach_task_episode(
     Ok(())
 }
 
+/// Persist the run's typed timing before its task row becomes terminal.
+///
+/// The agent owns the ledger and the task controller owns storage, so this is
+/// the one place in the TUI where both are in scope. A write failure is logged,
+/// never fatal: the task outcome is the primary evidence and the runtime
+/// breakdown is diagnostic.
+async fn persist_task_timing(
+    runtime: Option<&SessionRuntimeBudget>,
+    completion: Option<&CompletionRunContext>,
+    task_run_id: Option<TaskRunId>,
+) {
+    let (Some(runtime), Some(context), Some(task_run_id)) = (runtime, completion, task_run_id)
+    else {
+        return;
+    };
+    let checkpoint = context.agent.lock().await.take_timing_checkpoint();
+    if checkpoint.is_empty() {
+        return;
+    }
+    if let Err(error) = runtime
+        .storage
+        .checkpoint_task_run_timing(task_run_id, &checkpoint)
+        .await
+    {
+        tracing::warn!(
+            task_run_id = %task_run_id,
+            error = %format!("{error:#}"),
+            "failed to persist task timing"
+        );
+    }
+}
+
 async fn finish_task_run(
     runtime: Option<&SessionRuntimeBudget>,
     task_run_id: Option<TaskRunId>,
@@ -1670,6 +1716,21 @@ async fn begin_session_timing(
     let Some(session_id) = session_id else {
         anyhow::bail!("No active session is available for run timing");
     };
+    // A previous process may have died with intervals still open. Close them
+    // here — once, before this run records its own — so a resumed run accounts
+    // for its elapsed time instead of inheriting an open interval it cannot
+    // measure.
+    if let Err(error) = runtime
+        .storage
+        .reconcile_open_task_run_timings(session_id)
+        .await
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %format!("{error:#}"),
+            "failed to reconcile abandoned task timing"
+        );
+    }
     let active_run_ms = runtime.activity.begin_main(session_id).await?.active_run_ms;
     Ok(Some((session_id, active_run_ms)))
 }
