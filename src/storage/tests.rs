@@ -2399,7 +2399,7 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     // 0001 is the frozen 1.0 baseline (sqlx checksums applied migrations —
     // editing it bricks existing databases); every schema change after it is
     // an additive migration. Bump alongside each new migrations/*.sql file.
-    assert_eq!(migration_count, 11);
+    assert_eq!(migration_count, 12);
 
     let builtin_subagent_settings_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master \
@@ -2417,6 +2417,14 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     .await
     .unwrap();
     assert_eq!(task_run_timings_table, 1);
+    let inspection_cohort_index: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type = 'index' AND name = 'idx_usage_turns_inspection_cohort'",
+    )
+    .fetch_one(&fixture.storage.pool)
+    .await
+    .unwrap();
+    assert_eq!(inspection_cohort_index, 1);
     let invalid_setting = sqlx::query(
         "INSERT INTO builtin_subagent_settings \
          (subagent_id, enabled, primary_effort, updated_at_ms) VALUES ('explore', 1, 'high', 0)",

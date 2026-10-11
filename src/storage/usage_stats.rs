@@ -186,6 +186,9 @@ pub struct UsageDashboard {
     pub self_review: crate::self_review::SelfReviewStats,
     /// Exact cross-session duplicates excluded from trusted quality metrics.
     pub quality_evidence: QualityEvidenceIntegrity,
+    /// Inspection-batching telemetry for the `/usage` report (issue #143),
+    /// measured over the trailing cohort window.
+    pub inspection: super::InspectionBatchingStats,
     pub lifetime: LifetimeTotals,
 }
 
@@ -246,6 +249,11 @@ impl Storage {
             quarantined_verification_runs: self.load_quarantined_verification_run_count().await?,
             quarantined_self_review_runs,
         };
+        let inspection = self
+            .inspection_batching_stats(Some(super::inspection_stats::inspection_cohort_since_ms(
+                now_ms(),
+            )))
+            .await?;
         let lifetime = self.load_lifetime_totals().await?;
         Ok(UsageDashboard {
             today,
@@ -259,6 +267,7 @@ impl Storage {
             tools,
             self_review,
             quality_evidence,
+            inspection,
             lifetime,
         })
     }
@@ -592,6 +601,7 @@ mod derived_tests {
             tools: Vec::new(),
             self_review: Default::default(),
             quality_evidence: Default::default(),
+            inspection: Default::default(),
             lifetime: LifetimeTotals::default(),
         }
     }

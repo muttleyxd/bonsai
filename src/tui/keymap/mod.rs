@@ -1365,6 +1365,7 @@ mod tests {
                     tools: Vec::new(),
                     self_review: Default::default(),
                     quality_evidence: Default::default(),
+                    inspection: Default::default(),
                     lifetime: Default::default(),
                 }),
                 tab: UsageTab::Activity,

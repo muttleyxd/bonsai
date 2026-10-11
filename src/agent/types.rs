@@ -480,8 +480,17 @@ pub enum InspectionBatchClass {
     Unexplained,
 }
 
+impl Default for InspectionBatchClass {
+    /// `Unexplained` is the honest default: a turn whose diagnostics predate a
+    /// field, or whose class was never recorded, must not read as batched work.
+    fn default() -> Self {
+        Self::Unexplained
+    }
+}
+
 /// Persisted emission and execution evidence for an inspection turn.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct InspectionBatchDiagnostics {
     pub emitted_calls: usize,
     pub planned_widths: Vec<usize>,

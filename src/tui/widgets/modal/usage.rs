@@ -83,6 +83,76 @@ fn usage_body_lines(
     }
 }
 
+fn inspection_line(stats: &crate::storage::InspectionBatchingStats) -> Line<'static> {
+    let palette = theme::palette();
+    let share = stats
+        .singleton_share_percent()
+        .map_or_else(|| "n/a".to_string(), |percent| format!("{percent}%"));
+    let mut spans = vec![
+        Span::styled(" Inspection ", theme::muted()),
+        Span::styled(
+            format!(
+                "{} singleton groups of {} ({share})",
+                stats.singleton_groups, stats.groups
+            ),
+            theme::label(palette.text),
+        ),
+    ];
+    if stats.longest_singleton_streak > 0 {
+        spans.push(Span::styled(
+            " · longest cheap-single streak ",
+            theme::muted(),
+        ));
+        spans.push(Span::styled(
+            format!("{} turns", stats.longest_singleton_streak),
+            theme::label(palette.text),
+        ));
+    }
+    if stats.streaks_of_three_or_more > 0 {
+        spans.push(Span::styled(" · 3+ streaks ", theme::muted()));
+        spans.push(Span::styled(
+            format!("{}", stats.streaks_of_three_or_more),
+            theme::label(palette.text),
+        ));
+    }
+    if stats.excess_serial_turns > 0 {
+        spans.push(Span::styled(" · excess serial turns ", theme::muted()));
+        spans.push(Span::styled(
+            format!("{}", stats.excess_serial_turns),
+            theme::label(palette.text),
+        ));
+    }
+    if stats.advisories > 0 {
+        spans.push(Span::styled(" · advisories ", theme::muted()));
+        spans.push(Span::styled(
+            format!("{}", stats.advisories),
+            theme::label(palette.text),
+        ));
+    }
+    // Why the remaining serial turns happened: a declared dependency is not
+    // waste, an unlabelled one still might be.
+    let conflict = stats.count(crate::agent::InspectionBatchClass::ConflictForced);
+    let unexplained = stats.unexplained_serials();
+    if unexplained + conflict + stats.declared_dependent + stats.declared_independent > 0 {
+        spans.push(Span::styled(" · serial ", theme::muted()));
+        spans.push(Span::styled(
+            format!(
+                "{unexplained} unexplained · {} declared dependent · {} declared independent · {conflict} conflict-forced",
+                stats.declared_dependent, stats.declared_independent
+            ),
+            theme::label(palette.text),
+        ));
+    }
+    if stats.unreadable_turns > 0 {
+        spans.push(Span::styled(" · unreadable rows ", theme::muted()));
+        spans.push(Span::styled(
+            format!("{}", stats.unreadable_turns),
+            theme::label(palette.text),
+        ));
+    }
+    Line::from(spans)
+}
+
 fn activity_lines(dashboard: &UsageDashboard, inner_width: usize) -> Vec<Line<'static>> {
     let palette = theme::palette();
     let mut lines = Vec::new();
@@ -121,6 +191,9 @@ fn activity_lines(dashboard: &UsageDashboard, inner_width: usize) -> Vec<Line<'s
         ));
     }
     lines.push(Line::from(stats));
+    if dashboard.inspection.has_data() {
+        lines.push(inspection_line(&dashboard.inspection));
+    }
     if dashboard.self_review.runs > 0 {
         let rebuttal_rate = dashboard
             .self_review
@@ -354,5 +427,55 @@ mod tests {
             .as_deref(),
             Some("7 verification + 2 self-review cross-session duplicate rows quarantined")
         );
+    }
+
+    /// Flatten a rendered line into the text a user would read.
+    fn line_text(line: Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn inspection_line_reports_share_streaks_and_why_serials_happened() {
+        let stats = crate::storage::InspectionBatchingStats {
+            turns: 10,
+            groups: 12,
+            singleton_groups: 9,
+            longest_singleton_streak: 4,
+            streaks_of_three_or_more: 2,
+            excess_serial_turns: 3,
+            advisories: 1,
+            classification: vec![
+                (crate::agent::InspectionBatchClass::Unexplained, 6),
+                (crate::agent::InspectionBatchClass::ConflictForced, 2),
+            ],
+            ..Default::default()
+        };
+        let rendered = line_text(inspection_line(&stats));
+        assert!(rendered.contains("Inspection"), "{rendered}");
+        assert!(
+            rendered.contains("9 singleton groups of 12 (75%)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("longest cheap-single streak 4"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("excess serial turns 3"), "{rendered}");
+        assert!(rendered.contains("3+ streaks 2"), "{rendered}");
+        assert!(rendered.contains("advisories 1"), "{rendered}");
+        // The breakdown is what lets a reader tell a dependent serial from an
+        // avoidable one instead of guessing from the streak length.
+        assert!(rendered.contains("6 unexplained"), "{rendered}");
+        assert!(rendered.contains("2 conflict-forced"), "{rendered}");
+    }
+
+    #[test]
+    fn inspection_line_degrades_without_a_cohort() {
+        let rendered = line_text(inspection_line(&Default::default()));
+        assert!(rendered.contains("Inspection"), "{rendered}");
+        assert!(rendered.contains("n/a"), "{rendered}");
     }
 }

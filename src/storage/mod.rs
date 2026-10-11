@@ -42,6 +42,7 @@ mod builtin_subagents;
 mod context;
 mod episodes;
 pub(crate) use episodes::content_snippet as episode_content_snippet;
+mod inspection_stats;
 mod memory;
 mod peers;
 mod permissions;
@@ -70,6 +71,7 @@ pub(crate) use authorization::{AuthorizationDecisionRecord, NewAuthorizationDeci
 pub(crate) use background_wakes::{
     BackgroundWakeRegistration, BackgroundWakeTargetKind, BackgroundWakeTrigger,
 };
+pub use inspection_stats::InspectionBatchingStats;
 pub(crate) use peers::PEER_LIVENESS_THRESHOLD_MS;
 pub(crate) use peers::{
     CommittedPeerSend, CommittedPeerWake, PeerSendOperation, PeerWakeOperation,
