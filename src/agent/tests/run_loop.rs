@@ -3284,18 +3284,26 @@ impl Tool for ImageAttachmentTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object", "additionalProperties": false})
+        serde_json::json!({
+            "type": "object",
+            "properties": {"label": {"type": "string"}},
+            "additionalProperties": false
+        })
     }
 
     fn parallel_policy(&self) -> crate::tool::ParallelPolicy {
         crate::tool::ParallelPolicy::Serialized
     }
 
-    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+        let label = args
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("frame.png");
         Ok(ToolOutput::Image {
             mime_type: "image/png".to_string(),
             base64_data: "AAAA".to_string(),
-            description: "frame captured".to_string(),
+            description: format!("stub image frame: {label}"),
         })
     }
 }
@@ -3321,8 +3329,8 @@ async fn image_tool_results_are_attached_after_the_whole_tool_run() {
     let provider = MockProvider::new(vec![
         Ok(StreamedResponse {
             tool_calls: vec![
-                test_tool_call("call-0", "frame", "{}"),
-                test_tool_call("call-1", "frame", "{}"),
+                test_tool_call("call-0", "frame", r#"{"label":"a.png"}"#),
+                test_tool_call("call-1", "frame", r#"{"label":"b.png"}"#),
             ],
             ..StreamedResponse::default()
         }),
@@ -3370,6 +3378,16 @@ async fn image_tool_results_are_attached_after_the_whole_tool_run() {
         ["tool", "tool", "user", "user"],
         "an image attachment between the tool results 400s every later request"
     );
+
+    // Both attachments now follow the whole run, so each one has to name the
+    // tool result it came from or the model cannot tell the two files apart.
+    let attachment_json = |index: usize| {
+        serde_json::to_string(&second[assistant + index]).expect("attachment should serialize")
+    };
+    let first_frame = attachment_json(3);
+    let second_frame = attachment_json(4);
+    assert!(first_frame.contains("a.png"), "{first_frame}");
+    assert!(second_frame.contains("b.png"), "{second_frame}");
 }
 
 #[tokio::test]

@@ -1159,9 +1159,17 @@ pub(super) fn skipped_tool_results(
 
 /// Build the synthetic user message that carries an image tool result back to
 /// the model as a base64 data URI.
+///
+/// `label` names the source of the attachment — the tool result's own
+/// description, e.g. `Image file: a.png (1024 bytes, image/png)`. Attachments
+/// are flushed only after the whole tool run, so every result of the turn
+/// precedes them; without the label a batch that read two images hands back two
+/// indistinguishable messages and the model cannot tell which file is which.
+/// See `Agent::execute_tool_calls`.
 pub(super) fn image_user_message(
     mime_type: &str,
     base64_data: &str,
+    label: &str,
 ) -> ChatCompletionRequestMessage {
     // Ingest gate: a media type no wire target accepts (e.g. `image/svg+xml`
     // from a model-requested `read`) must never enter the history, where it
@@ -1189,13 +1197,24 @@ pub(super) fn image_user_message(
             ChatCompletionRequestUserMessageContentPart::Text(
                 ChatCompletionRequestMessageContentPartText {
                     prompt_cache_breakpoint: None,
-                    text: "Here is the image content you requested to view:".to_string(),
+                    text: image_attachment_text(label),
                 },
             ),
             image_part,
         ]),
         name: None,
     })
+}
+
+/// The text part that introduces an image attachment. Unlabeled attachments
+/// (a `ToolOutput::Image` with no description) keep the bare prefix.
+fn image_attachment_text(label: &str) -> String {
+    const PREFIX: &str = "Here is the image content you requested to view:";
+    if label.trim().is_empty() {
+        PREFIX.to_string()
+    } else {
+        format!("{PREFIX} {label}")
+    }
 }
 
 #[cfg(test)]
@@ -1215,7 +1234,11 @@ mod tests {
         // Regression: `ToolOutput::Image` for an SVG produced
         // `data:image/svg+xml` here, entered the history, and 400ed every
         // later request of the session.
-        let message = image_user_message("image/svg+xml", "PHN2Zz4=");
+        let message = image_user_message(
+            "image/svg+xml",
+            "PHN2Zz4=",
+            "Image file: logo.svg (4 bytes, image/svg+xml)",
+        );
         let json = serde_json::to_string(&message).unwrap();
         assert!(!json.contains("data:image/svg+xml"));
         assert!(!json.contains("image_url"));
@@ -1224,9 +1247,42 @@ mod tests {
 
     #[test]
     fn image_user_message_keeps_supported_media_type_as_image_part() {
-        let message = image_user_message("image/png", "AAAA");
+        let message = image_user_message(
+            "image/png",
+            "AAAA",
+            "Image file: a.png (1 bytes, image/png)",
+        );
         let json = serde_json::to_string(&message).unwrap();
         assert!(json.contains("data:image/png;base64,AAAA"));
+    }
+
+    #[test]
+    fn image_user_message_names_the_tool_result_it_carries() {
+        // Attachments are flushed after the whole tool run, so a batch that read
+        // two images produces two adjacent `user` messages: the label is the
+        // only thing that says which file each one is.
+        let json = serde_json::to_string(&image_user_message(
+            "image/png",
+            "AAAA",
+            "Image file: b.png (2 bytes, image/png)",
+        ))
+        .unwrap();
+        assert!(
+            json.contains("Here is the image content you requested to view: Image file: b.png (2 bytes, image/png)"),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn image_attachment_text_falls_back_to_the_bare_prefix() {
+        assert_eq!(
+            image_attachment_text("  "),
+            "Here is the image content you requested to view:"
+        );
+        assert_eq!(
+            image_attachment_text("Image file: a.png (1 bytes, image/png)"),
+            "Here is the image content you requested to view: Image file: a.png (1 bytes, image/png)"
+        );
     }
 
     /// Stub tool with a schema rich enough to exercise every repair rule

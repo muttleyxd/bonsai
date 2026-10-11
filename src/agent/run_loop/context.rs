@@ -342,7 +342,7 @@ impl Agent {
         if let ToolOutput::Image {
             mime_type,
             base64_data,
-            ..
+            description,
         } = result
         {
             // Hold the attachment back until the turn's last tool message has
@@ -356,9 +356,13 @@ impl Agent {
             // session permanently: reading two images in one batch used to
             // wedge a session for good. The flush happens once, after the
             // batch, in `Agent::execute_tool_calls`.
+            //
+            // The attachment carries the result's own description, because the
+            // flush puts it after every tool result of the turn: without it two
+            // images read in one batch are indistinguishable.
             batch
                 .image_messages
-                .push(image_user_message(&mime_type, &base64_data));
+                .push(image_user_message(&mime_type, &base64_data, &description));
         }
         Ok(())
     }
