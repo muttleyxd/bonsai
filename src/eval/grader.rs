@@ -459,7 +459,7 @@ fn shell_command(command: &str) -> Command {
 
     #[cfg(not(windows))]
     {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let shell = crate::util::shell::user_shell();
         let mut cmd = Command::new(shell);
         cmd.arg("-c").arg(command);
         cmd

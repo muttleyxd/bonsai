@@ -1,6 +1,7 @@
 pub(crate) mod ansi;
 pub(crate) mod env;
 pub(crate) mod format;
+pub(crate) mod shell;
 pub(crate) mod slug;
 #[cfg(test)]
 pub(crate) mod test_env;

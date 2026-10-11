@@ -511,7 +511,7 @@ mod tests {
     use crate::storage::test_utils::TestStorage;
 
     fn shell() -> String {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+        crate::util::shell::user_shell()
     }
 
     #[tokio::test]

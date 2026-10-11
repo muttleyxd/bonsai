@@ -496,7 +496,7 @@ fn first_run_transition_accepts_only_a_completed_initial_prompt() {
 }
 
 fn shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    crate::util::shell::user_shell()
 }
 
 fn background_task_snapshot(

@@ -322,7 +322,7 @@ impl BashTool {
         let canonical_project_root = project_root
             .canonicalize()
             .unwrap_or_else(|_| project_root.clone());
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let shell = crate::util::shell::user_shell();
         Self {
             project_root,
             canonical_project_root: canonical_project_root.clone(),
