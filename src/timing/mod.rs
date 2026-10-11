@@ -605,18 +605,24 @@ impl TimingLedger {
         let elapsed_ms = (now_monotonic_ms - state.started_monotonic_ms).max(0);
         let intervals = &state.intervals;
         let critical_path_ms = union_ms(intervals.iter().map(TimingInterval::range));
-        let active_compute_ms = union_ms(
-            intervals
-                .iter()
-                .filter(|interval| interval.category.consumes_active_compute())
-                .map(TimingInterval::range),
-        );
-        let waiting_ms = union_ms(
-            intervals
-                .iter()
-                .filter(|interval| interval.category.is_wait())
-                .map(TimingInterval::range),
-        );
+        let work_ranges: Vec<(i64, i64)> = intervals
+            .iter()
+            .filter(|interval| interval.category.consumes_active_compute())
+            .map(TimingInterval::range)
+            .collect();
+        let wait_ranges: Vec<(i64, i64)> = intervals
+            .iter()
+            .filter(|interval| interval.category.is_wait())
+            .map(TimingInterval::range)
+            .collect();
+        // Waiting that happened *inside* a work interval — a permission prompt
+        // during a tool call, a queue wait inside the tasks tool — is still
+        // waiting. Charging it to active compute would make "waiting is excluded
+        // from the compute clock" false, so the work union has its overlap with
+        // the wait union removed.
+        let waiting_ms = union_ms(wait_ranges.iter().copied());
+        let active_compute_ms = union_ms(work_ranges.iter().copied())
+            .saturating_sub(intersection_ms(&work_ranges, &wait_ranges));
 
         let mut categories: Vec<CategoryTiming> = Vec::new();
         for interval in intervals {
@@ -707,20 +713,24 @@ impl TimingLedger {
         }
 
         let critical_path_ms = union_ms(state.intervals.iter().map(clamp));
-        let active_compute_ms = union_ms(
-            state
-                .intervals
-                .iter()
-                .filter(|interval| interval.category.consumes_active_compute())
-                .map(clamp),
-        );
-        let waiting_ms = union_ms(
-            state
-                .intervals
-                .iter()
-                .filter(|interval| interval.category.is_wait())
-                .map(clamp),
-        );
+        // Waiting nested inside a work interval is removed from the work clock,
+        // exactly as in `snapshot`: a permission prompt answered during a tool
+        // call is still waiting, not work.
+        let wait_ranges: Vec<(i64, i64)> = state
+            .intervals
+            .iter()
+            .filter(|interval| interval.category.is_wait())
+            .map(clamp)
+            .collect();
+        let work_ranges: Vec<(i64, i64)> = state
+            .intervals
+            .iter()
+            .filter(|interval| interval.category.consumes_active_compute())
+            .map(clamp)
+            .collect();
+        let waiting_ms = union_ms(wait_ranges.iter().copied());
+        let active_compute_ms = union_ms(work_ranges.iter().copied())
+            .saturating_sub(intersection_ms(&work_ranges, &wait_ranges));
         let open_interval_count = u32::try_from(state.open.len()).unwrap_or(u32::MAX);
         state.checkpoint_monotonic_ms = window_end;
         categories.sort_by_key(|row| (row.category, row.lane));
@@ -800,26 +810,55 @@ fn delta_row(
     &mut rows[index]
 }
 
+/// Merge overlapping or touching intervals into a minimal covering set.
+fn merged(ranges: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    let mut sorted: Vec<(i64, i64)> = ranges
+        .iter()
+        .copied()
+        .filter(|(start, end)| end > start)
+        .collect();
+    sorted.sort_unstable();
+    let mut out: Vec<(i64, i64)> = Vec::with_capacity(sorted.len());
+    for (start, end) in sorted {
+        match out.last_mut() {
+            Some((_, last_end)) if start <= *last_end => *last_end = (*last_end).max(end),
+            _ => out.push((start, end)),
+        }
+    }
+    out
+}
+
 /// Total length of the union of `ranges`, ignoring empty ones.
 fn union_ms(ranges: impl Iterator<Item = (i64, i64)>) -> i64 {
-    let mut ranges: Vec<(i64, i64)> = ranges.filter(|(start, end)| end > start).collect();
-    ranges.sort_unstable();
+    let ranges: Vec<(i64, i64)> = ranges.collect();
+    merged(&ranges)
+        .into_iter()
+        .map(|(start, end)| end - start)
+        .fold(0_i64, i64::saturating_add)
+}
+
+/// Total length shared by two sets of intervals, each treated as a union.
+///
+/// Used to remove waiting from work: a wait nested inside a work interval is in
+/// both unions, and the exclusion is only real if that overlap is measured.
+fn intersection_ms(left: &[(i64, i64)], right: &[(i64, i64)]) -> i64 {
+    let left = merged(left);
+    let right = merged(right);
+    let (mut i, mut j) = (0_usize, 0_usize);
     let mut total = 0_i64;
-    let mut current: Option<(i64, i64)> = None;
-    for (start, end) in ranges {
-        current = match current {
-            Some((current_start, current_end)) if start <= current_end => {
-                Some((current_start, current_end.max(end)))
-            }
-            Some((current_start, current_end)) => {
-                total = total.saturating_add(current_end - current_start);
-                Some((start, end))
-            }
-            None => Some((start, end)),
-        };
-    }
-    if let Some((current_start, current_end)) = current {
-        total = total.saturating_add(current_end - current_start);
+    while i < left.len() && j < right.len() {
+        let (left_start, left_end) = left[i];
+        let (right_start, right_end) = right[j];
+        let start = left_start.max(right_start);
+        let end = left_end.min(right_end);
+        if end > start {
+            total = total.saturating_add(end - start);
+        }
+        if left_end < right_end {
+            i += 1;
+        } else {
+            j += 1;
+        }
     }
     total
 }
@@ -854,6 +893,58 @@ mod tests {
 
     fn ledger() -> (Arc<FakeClock>, TimingLedger) {
         ledger_with(TimingPolicy::ActiveCompute)
+    }
+
+    #[test]
+    fn a_wait_inside_a_tool_call_is_removed_from_active_compute() {
+        let (clock, ledger) = ledger();
+        let tool = ledger.begin(
+            TimingCategory::ToolActive,
+            TimingLane::Parent,
+            Some("bash"),
+            None,
+        );
+        clock.advance_ms(200);
+        let prompt = ledger.begin(
+            TimingCategory::PermissionWait,
+            TimingLane::Parent,
+            Some("permission"),
+            Some("waiting for approval"),
+        );
+        clock.advance_ms(400);
+        ledger.end(prompt);
+        clock.advance_ms(400);
+        ledger.end(tool);
+
+        // One second of tool work, 400ms of which was an approval prompt: the
+        // prompt is waiting, and "waiting is excluded from the compute clock"
+        // has to survive the prompt happening *inside* the tool call.
+        let snapshot = ledger.snapshot();
+        assert_eq!(snapshot.critical_path_ms, 1_000);
+        assert_eq!(snapshot.waiting_ms, 400);
+        assert_eq!(snapshot.active_compute_ms, 600);
+        assert_eq!(snapshot.budget_consumed_ms(), 600);
+    }
+
+    #[test]
+    fn a_nested_wait_is_also_removed_from_the_checkpoint_delta() {
+        let (clock, ledger) = ledger();
+        let tool = ledger.begin(TimingCategory::ToolActive, TimingLane::Parent, None, None);
+        clock.advance_ms(100);
+        let queue = ledger.begin(
+            TimingCategory::Queue,
+            TimingLane::Parent,
+            Some("tasks"),
+            Some("waiting for background work"),
+        );
+        clock.advance_ms(300);
+        ledger.end(queue);
+        ledger.end(tool);
+
+        let checkpoint = ledger.take_checkpoint();
+        assert_eq!(checkpoint.critical_path_ms, 400);
+        assert_eq!(checkpoint.waiting_ms, 300);
+        assert_eq!(checkpoint.active_compute_ms, 100);
     }
 
     fn summed(snapshot: &TimingSnapshot, category: TimingCategory, lane: TimingLane) -> i64 {
