@@ -528,7 +528,38 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             repeated_failure_action,
             &response,
         )?;
-        let batching_hint = policies.single_call_streak.hint_for(&response.tool_calls);
+        let batching_hint = policies.single_call_streak.hint_for(&response.tool_calls).map(|hint| {
+            let versions: Vec<_> = self.agent.read_evidence_snapshot().into_iter().rev().take(8).map(|record| {
+                let baseline = record.evidence.freshness_baseline();
+                serde_json::json!({
+                    "path": baseline.canonical_path().to_string_lossy(),
+                    "current_digest": baseline.current_file_digest().map(|digest| digest.to_hex().to_string()),
+                    "freshness": record.evidence.freshness().label(),
+                    "observed_content_digest": record.target_content_digest.to_hex().to_string(),
+                })
+            }).collect();
+            format!("{hint}\n{}", crate::tool::wrap_untrusted_content(
+                "inspection batching versions", &serde_json::Value::Array(versions).to_string(),
+            ))
+        });
+        if response
+            .tool_calls
+            .iter()
+            .any(|call| batchable_single_call_tool(&call.name))
+        {
+            let (classification, dependency_reason) = inspection_declaration(&response.content);
+            if let Some(turn) = self.agent.usage.usage_turns.last_mut() {
+                turn.inspection_batch = Some(InspectionBatchDiagnostics {
+                    emitted_calls: response.tool_calls.len(),
+                    planned_widths: Vec::new(),
+                    actual_widths: Vec::new(),
+                    classification,
+                    dependency_reason,
+                    singleton_streak: policies.single_call_streak.streak,
+                    advisory_emitted: batching_hint.is_some(),
+                });
+            }
+        }
         let serial_delegation_hint =
             policies
                 .serial_delegation

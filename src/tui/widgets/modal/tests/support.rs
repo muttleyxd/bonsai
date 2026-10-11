@@ -271,6 +271,7 @@ pub(super) fn context_report_with_usage_turns() -> crate::agent::ContextReport {
         inspection_returned_chars: 8_000,
         inspection_avoided_chars: 12_000,
         delegated_parent_overlap: 0,
+        inspection_batch: None,
     };
     let warm = turn(1);
     let mut cold = turn(2);

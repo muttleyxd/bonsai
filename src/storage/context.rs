@@ -420,9 +420,9 @@ impl Storage {
                   created_at_ms, latency_ms, ttft_ms, prefix_hash,
                   inspection_executed, inspection_reused, inspection_rejected,
                   inspection_returned_chars, inspection_avoided_chars,
-                  delegated_parent_overlap
+                  delegated_parent_overlap, inspection_batch_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(session_id.as_i64())
@@ -485,6 +485,7 @@ impl Storage {
             .bind(usize_to_i64(turn.inspection_returned_chars))
             .bind(usize_to_i64(turn.inspection_avoided_chars))
             .bind(usize_to_i64(turn.delegated_parent_overlap))
+            .bind(turn.inspection_batch.as_ref().map(serde_json::to_string).transpose().context("Failed to serialize inspection batching diagnostics")?)
             .execute(&mut **tx)
             .await?;
         }
@@ -511,8 +512,8 @@ impl Storage {
               cache_measured_input_tokens, actual_cache_read_percent,
               inspection_executed, inspection_reused, inspection_rejected,
               inspection_returned_chars, inspection_avoided_chars,
-              delegated_parent_overlap
-            ) AS (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?))
+              delegated_parent_overlap, inspection_batch_json
+            ) AS (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?))
             UPDATE usage_turns
             SET parent_tool_call_id = incoming.parent_tool_call_id,
                 launch_group_id = incoming.launch_group_id,
@@ -525,7 +526,8 @@ impl Storage {
                 inspection_rejected = incoming.inspection_rejected,
                 inspection_returned_chars = incoming.inspection_returned_chars,
                 inspection_avoided_chars = incoming.inspection_avoided_chars,
-                delegated_parent_overlap = incoming.delegated_parent_overlap
+                delegated_parent_overlap = incoming.delegated_parent_overlap,
+                inspection_batch_json = incoming.inspection_batch_json
             FROM incoming
             WHERE usage_turns.session_id = ? AND usage_turns.seq = ?
               AND (
@@ -540,7 +542,8 @@ impl Storage {
                 usage_turns.inspection_rejected IS NOT incoming.inspection_rejected OR
                 usage_turns.inspection_returned_chars IS NOT incoming.inspection_returned_chars OR
                 usage_turns.inspection_avoided_chars IS NOT incoming.inspection_avoided_chars OR
-                usage_turns.delegated_parent_overlap IS NOT incoming.delegated_parent_overlap
+                usage_turns.delegated_parent_overlap IS NOT incoming.delegated_parent_overlap OR
+                usage_turns.inspection_batch_json IS NOT incoming.inspection_batch_json
               )
             "#,
             )
@@ -556,6 +559,7 @@ impl Storage {
             .bind(usize_to_i64(turn.inspection_returned_chars))
             .bind(usize_to_i64(turn.inspection_avoided_chars))
             .bind(usize_to_i64(turn.delegated_parent_overlap))
+            .bind(turn.inspection_batch.as_ref().map(serde_json::to_string).transpose().context("Failed to serialize inspection batching diagnostics")?)
             .bind(session_id.as_i64())
             .bind(usize_to_i64(turn.seq)),
         )?;
@@ -578,7 +582,7 @@ impl Storage {
              context_window_tokens, rewrite_kind, rewrite_saved_tokens, episode_seq, \
              created_at_ms, latency_ms, ttft_ms, prefix_hash, \
              inspection_executed, inspection_reused, inspection_rejected, \
-             inspection_returned_chars, inspection_avoided_chars, delegated_parent_overlap \
+             inspection_returned_chars, inspection_avoided_chars, delegated_parent_overlap, inspection_batch_json \
              FROM usage_turns WHERE session_id = ? ORDER BY seq",
         )
         .bind(session_id.as_i64())
@@ -710,6 +714,11 @@ impl Storage {
                         as usize,
                     delegated_parent_overlap: row.try_get::<i64, _>("delegated_parent_overlap")?
                         as usize,
+                    inspection_batch: row
+                        .try_get::<Option<String>, _>("inspection_batch_json")?
+                        .map(|json| serde_json::from_str(&json))
+                        .transpose()
+                        .context("Failed to deserialize inspection batching diagnostics")?,
                 })
             })
             .collect()

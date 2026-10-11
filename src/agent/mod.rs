@@ -1964,9 +1964,9 @@ pub(crate) use types::MessageProvenance;
 pub use types::{
     ActiveModelIdentity, AgentRunResult, CompactionMode, CompactionReport, CompactionRequest,
     CompactionSummaryPolicy, CompactionSummarySource, ContextRewriteKind, ExecutionLane,
-    ExecutionLaneKind, ImageAttachment, PeerWait, ProviderAttemptOutcome, ProviderAttemptReport,
-    QueuedUserMessage, QueuedUserMessageCommand, UsageTotals, UsageTurn, UsageTurnStatus,
-    UserInput, WaitReason,
+    ExecutionLaneKind, ImageAttachment, InspectionBatchClass, InspectionBatchDiagnostics, PeerWait,
+    ProviderAttemptOutcome, ProviderAttemptReport, QueuedUserMessage, QueuedUserMessageCommand,
+    UsageTotals, UsageTurn, UsageTurnStatus, UserInput, WaitReason,
 };
 use types::{context_message_seq, format_context_message_id};
 use usage_ledger::*;

@@ -367,6 +367,7 @@ pub struct UsageTurnReport {
     pub inspection_returned_chars: usize,
     pub inspection_avoided_chars: usize,
     pub delegated_parent_overlap: usize,
+    pub inspection_batch: Option<crate::agent::InspectionBatchDiagnostics>,
 }
 
 fn serialize_optional_reasoning<S>(
@@ -435,6 +436,7 @@ impl From<&UsageTurn> for UsageTurnReport {
             inspection_returned_chars: turn.inspection_returned_chars,
             inspection_avoided_chars: turn.inspection_avoided_chars,
             delegated_parent_overlap: turn.delegated_parent_overlap,
+            inspection_batch: turn.inspection_batch.clone(),
         }
     }
 }
@@ -494,6 +496,7 @@ impl UsageTurnReport {
             inspection_returned_chars: self.inspection_returned_chars,
             inspection_avoided_chars: self.inspection_avoided_chars,
             delegated_parent_overlap: self.delegated_parent_overlap,
+            inspection_batch: self.inspection_batch.clone(),
         }
     }
 }

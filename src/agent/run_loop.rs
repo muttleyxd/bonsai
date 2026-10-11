@@ -23,8 +23,6 @@ const REPAIR_ADVISORY_LINE_CHARS: usize = 220;
 /// 1.16 tool calls per turn across 86 turns with the batching rule already in
 /// its system prompt, and every extra round-trip re-sends the full prompt.
 const BATCHING_HINT_STREAK: usize = 3;
-const BATCHING_HINT_REARM_STREAK: usize = BATCHING_HINT_STREAK * 5;
-const BATCHING_HINT_LIMIT: usize = 3;
 /// Distinct model turns that may touch the same file-read target before Bonsai
 /// treats it as a loop: one real read, one compact pointer, and one explicit
 /// refresh. Counts turns, not calls, so one batched multi-window inspection is
@@ -631,6 +629,20 @@ impl Agent {
             widths = ?planned_batches.iter().map(Vec::len).collect::<Vec<_>>(),
             "planned tool-call batches",
         );
+        let inspection_turn_index = self.usage.usage_turns.len().checked_sub(1);
+        if let Some(diagnostics) = inspection_turn_index
+            .and_then(|index| self.usage.usage_turns.get_mut(index))
+            .and_then(|turn| turn.inspection_batch.as_mut())
+        {
+            diagnostics.planned_widths = planned_batches.iter().map(Vec::len).collect();
+            if tool_calls.len() > 1 {
+                diagnostics.classification = if planned_batches.len() > 1 {
+                    InspectionBatchClass::ConflictForced
+                } else {
+                    InspectionBatchClass::Batched
+                };
+            }
+        }
         let mut batches = planned_batches.into_iter().peekable();
         let mut trusted_contexts = Vec::new();
         let mut scoped_contexts = Vec::new();
@@ -784,6 +796,24 @@ impl Agent {
                 .await
             };
 
+            if let Some(diagnostics) = inspection_turn_index
+                .and_then(|index| self.usage.usage_turns.get_mut(index))
+                .and_then(|turn| turn.inspection_batch.as_mut())
+            {
+                diagnostics.actual_widths.push(
+                    results
+                        .iter()
+                        .filter(|(_, _, status)| {
+                            matches!(
+                                status,
+                                crate::output::ToolExecutionStatus::Succeeded
+                                    | crate::output::ToolExecutionStatus::Failed
+                                    | crate::output::ToolExecutionStatus::Started
+                            )
+                        })
+                        .count(),
+                );
+            }
             tracing::debug!(
                 target: "bonsai::batching",
                 width = batch_width,
@@ -3015,11 +3045,8 @@ type RepeatedInspectionAction = GuardAction<String>;
 
 /// Nudges the model to batch independent tool calls, at the point of failure.
 /// Fires after [`BATCHING_HINT_STREAK`] consecutive turns that each carried
-/// exactly one cheap inspection or todo-bookkeeping call. A model that remains
-/// serialized may receive another hint only after
-/// [`BATCHING_HINT_REARM_STREAK`] more such turns, capped by
-/// [`BATCHING_HINT_LIMIT`]; a multi-call turn or any other tool resets the
-/// current streak. Distinct from
+/// exactly one cheap inspection or todo-bookkeeping call. Fires once per
+/// streak; a multi-call turn or any other tool rearms the advisory. Distinct from
 /// [`RepeatedInspectionGuard`]: that guard breaks loops re-running the *same*
 /// inspection, this one addresses fresh-but-serialized single calls that
 /// should have shared one turn.
@@ -3027,6 +3054,9 @@ type RepeatedInspectionAction = GuardAction<String>;
 struct SingleCallStreakGuard {
     streak: usize,
     hints_emitted: usize,
+    targets: Vec<String>,
+    inspection_turn: usize,
+    mutation_turn: usize,
 }
 
 const SERIAL_DELEGATION_NUDGE: &str =
@@ -3070,25 +3100,42 @@ impl SingleCallStreakGuard {
     fn hint_for(&mut self, tool_calls: &[ToolCall]) -> Option<String> {
         let is_single_batchable_call =
             matches!(tool_calls, [only] if batchable_single_call_tool(&only.name));
+        if tool_calls.iter().any(|call| is_mutation_tool(&call.name)) {
+            self.mutation_turn = self.mutation_turn.saturating_add(1);
+        }
         if !is_single_batchable_call {
             self.streak = 0;
+            self.hints_emitted = 0;
+            self.targets.clear();
             return None;
         }
+        self.inspection_turn = self.inspection_turn.saturating_add(1);
         self.streak = self.streak.saturating_add(1);
-        if self.hints_emitted >= BATCHING_HINT_LIMIT {
+        if let Some(call) = tool_calls.first() {
+            let args = serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
+            let path = args.as_ref().and_then(path_arg).unwrap_or(".");
+            // Keep target data bounded; frame it as untrusted below.
+            let path: String = path.chars().take(256).collect();
+            let target = serde_json::json!({"tool": call.name, "path": path}).to_string();
+            if self.targets.len() == 8 {
+                self.targets.remove(0);
+            }
+            self.targets.push(target);
+        }
+        if self.streak != BATCHING_HINT_STREAK || self.hints_emitted != 0 {
             return None;
         }
-        let threshold = if self.hints_emitted == 0 {
-            BATCHING_HINT_STREAK
-        } else {
-            BATCHING_HINT_REARM_STREAK
-        };
-        if self.streak < threshold {
-            return None;
-        }
-        self.streak = 0;
-        self.hints_emitted = self.hints_emitted.saturating_add(1);
-        Some(batching_hint_message())
+        self.hints_emitted = 1;
+        Some(format!(
+            "Inspection batching advisory: {}\n{}\nRun-local inspection turn: {}; mutation-tool turn: {} (counters, not filesystem freshness).\nChoices: batch independent targets; explain the dependency; mutate; ask a focused question; conclude. For a dependent singleton, put `Inspection dependency: <why the previous result was needed>` in assistant text alongside the calls; for known independent targets issued serially use `Inspection independent: <why>`. These declarations are recorded, not enforced; serial reads remain allowed.",
+            batching_hint_message(),
+            crate::tool::wrap_untrusted_content(
+                "inspection targets",
+                &format!("[{}]", self.targets.join(","))
+            ),
+            self.inspection_turn,
+            self.mutation_turn,
+        ))
     }
 }
 
@@ -3097,6 +3144,28 @@ impl SingleCallStreakGuard {
 /// whole turns on todo updates, four of them no-ops).
 fn batchable_single_call_tool(name: &str) -> bool {
     structured_file_read_tool(name) || repeated_inspection_tool(name) || name == "todowrite"
+}
+
+/// Only explicit model declarations classify singleton intent. Missing declarations
+/// stay unknown instead of being mislabeled as avoidable independent work.
+fn inspection_declaration(content: &str) -> (InspectionBatchClass, Option<String>) {
+    for line in content.lines() {
+        for (prefix, classification) in [
+            ("Inspection dependency:", InspectionBatchClass::Dependent),
+            (
+                "Inspection independent:",
+                InspectionBatchClass::IndependentSerial,
+            ),
+        ] {
+            if let Some(reason) = line.trim().strip_prefix(prefix) {
+                let reason: String = reason.trim().chars().take(512).collect();
+                if !reason.is_empty() {
+                    return (classification, Some(reason));
+                }
+            }
+        }
+    }
+    (InspectionBatchClass::Unexplained, None)
 }
 
 fn batching_hint_message() -> String {
@@ -3763,7 +3832,7 @@ mod tests {
     }
 
     #[test]
-    fn single_call_streak_guard_rearms_slowly_and_caps_hints() {
+    fn single_call_streak_guard_emits_once_per_streak() {
         let mut guard = SingleCallStreakGuard::default();
         // Fresh targets each turn — RepeatedInspectionGuard territory this is not.
         assert!(
@@ -3781,7 +3850,7 @@ mod tests {
             hint.is_some_and(|text| text.contains("batch")),
             "third consecutive single call must produce the batching hint",
         );
-        for index in 1..BATCHING_HINT_REARM_STREAK {
+        for index in 1..30 {
             assert!(
                 guard
                     .hint_for(&[call("read", &format!(r#"{{"path":"b{index}.rs"}}"#))])
@@ -3789,35 +3858,46 @@ mod tests {
                 "repeat hint fired before the long re-arm threshold"
             );
         }
-        assert!(
-            guard
-                .hint_for(&[call("grep", r#"{"pattern":"second"}"#)])
-                .is_some(),
-            "a persistently serialized model should receive a second hint"
-        );
-
-        for _ in 1..BATCHING_HINT_REARM_STREAK {
+        assert_eq!(guard.hints_emitted, 1);
+        assert_eq!(guard.targets.len(), 8);
+        assert!(guard.hint_for(&[call("question", "{}")]).is_none());
+        for index in 0..2 {
             assert!(
                 guard
-                    .hint_for(&[call("read", r#"{"path":"repeat.rs"}"#)])
+                    .hint_for(&[call("read", &format!(r#"{{"path":"new{index}.rs"}}"#))])
                     .is_none()
             );
         }
-        assert!(
-            guard
-                .hint_for(&[call("grep", r#"{"pattern":"third"}"#)])
-                .is_some(),
-            "the final allowed hint should fire"
-        );
+        let hint = guard
+            .hint_for(&[call("read", r#"{"path":"third.rs"}"#)])
+            .unwrap();
+        assert!(hint.contains("third.rs"));
+        assert!(hint.contains("Inspection dependency:"));
+        assert!(hint.contains("Choices:"));
+        assert_eq!(guard.hints_emitted, 1);
+    }
 
-        for _ in 0..BATCHING_HINT_REARM_STREAK * 2 {
-            assert!(
-                guard
-                    .hint_for(&[call("read", r#"{"path":"capped.rs"}"#)])
-                    .is_none(),
-                "the hard hint cap must suppress further reminders"
-            );
-        }
+    #[test]
+    fn inspection_declarations_are_explicit_bounded_and_optional() {
+        assert_eq!(
+            inspection_declaration("reading next"),
+            (InspectionBatchClass::Unexplained, None)
+        );
+        assert_eq!(
+            inspection_declaration("Inspection dependency: search found this file"),
+            (
+                InspectionBatchClass::Dependent,
+                Some("search found this file".to_string())
+            )
+        );
+        assert_eq!(
+            inspection_declaration("Inspection dependency:   "),
+            (InspectionBatchClass::Unexplained, None)
+        );
+        let (class, reason) =
+            inspection_declaration(&format!("Inspection independent: {}", "x".repeat(900)));
+        assert_eq!(class, InspectionBatchClass::IndependentSerial);
+        assert_eq!(reason.unwrap().len(), 512);
     }
 
     #[test]

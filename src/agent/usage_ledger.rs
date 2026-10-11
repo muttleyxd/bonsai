@@ -399,6 +399,7 @@ impl SessionUsage {
             inspection_returned_chars: 0,
             inspection_avoided_chars: 0,
             delegated_parent_overlap: 0,
+            inspection_batch: None,
         }
     }
 
@@ -1024,6 +1025,7 @@ mod tests {
             inspection_returned_chars: 0,
             inspection_avoided_chars: 0,
             delegated_parent_overlap: 0,
+            inspection_batch: None,
         }
     }
 

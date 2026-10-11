@@ -467,6 +467,32 @@ impl ContextRewriteKind {
     }
 }
 
+/// Evidence-based classification of an inspection group's scheduling.
+/// Unexplained singletons are not assumed avoidable: the runtime cannot infer
+/// what the model knew before seeing the previous result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InspectionBatchClass {
+    Batched,
+    Dependent,
+    IndependentSerial,
+    ConflictForced,
+    Unexplained,
+}
+
+/// Persisted emission and execution evidence for an inspection turn.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct InspectionBatchDiagnostics {
+    pub emitted_calls: usize,
+    pub planned_widths: Vec<usize>,
+    pub actual_widths: Vec<usize>,
+    pub classification: InspectionBatchClass,
+    /// Model-declared dependency; data, never an executable instruction.
+    pub dependency_reason: Option<String>,
+    pub singleton_streak: usize,
+    pub advisory_emitted: bool,
+}
+
 /// Persisted usage/cache diagnostics for one provider response.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageTurn {
@@ -534,6 +560,7 @@ pub struct UsageTurn {
     pub(crate) inspection_returned_chars: usize,
     pub(crate) inspection_avoided_chars: usize,
     pub(crate) delegated_parent_overlap: usize,
+    pub(crate) inspection_batch: Option<InspectionBatchDiagnostics>,
 }
 
 impl UsageTurn {

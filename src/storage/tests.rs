@@ -2111,6 +2111,15 @@ fn usage_turn(
         inspection_returned_chars: 1_000 + seq,
         inspection_avoided_chars: 2_000 + seq,
         delegated_parent_overlap: seq % 2,
+        inspection_batch: Some(crate::agent::InspectionBatchDiagnostics {
+            emitted_calls: 1,
+            planned_widths: vec![1],
+            actual_widths: vec![1],
+            classification: crate::agent::InspectionBatchClass::Dependent,
+            dependency_reason: Some("previous search identified the target".to_string()),
+            singleton_streak: seq,
+            advisory_emitted: seq == 3,
+        }),
     }
 }
 
@@ -2119,7 +2128,7 @@ async fn usage_turns_snapshot_roundtrips() {
     let fixture = TestStorage::new().await;
     let storage = &fixture.storage;
     let session_id = fixture.start_session().await;
-    let turns = vec![
+    let mut turns = vec![
         usage_turn(
             1,
             crate::agent::UsageTurnStatus::Reported,
@@ -2149,6 +2158,10 @@ async fn usage_turns_snapshot_roundtrips() {
         .unwrap();
     assert_eq!(snapshot.usage_turns, turns);
 
+    // Batching diagnostics are attached after the provider turn was recorded;
+    // the mutable update path must preserve them and the report round-trip.
+    turns[0].inspection_batch.as_mut().unwrap().actual_widths = vec![0];
+    turns[1].inspection_batch = None;
     // Re-flushing the same turns must not clobber their execution timestamps.
     storage
         .sync_usage_turns_snapshot(session_id, &turns)
@@ -2382,7 +2395,7 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     // 0001 is the frozen 1.0 baseline (sqlx checksums applied migrations —
     // editing it bricks existing databases); every schema change after it is
     // an additive migration. Bump alongside each new migrations/*.sql file.
-    assert_eq!(migration_count, 8);
+    assert_eq!(migration_count, 9);
 
     let builtin_subagent_settings_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master \

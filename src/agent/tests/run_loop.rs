@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent::RetryBackoff;
+use crate::agent::{InspectionBatchClass, RetryBackoff};
 use std::path::PathBuf;
 
 struct DeltaProvider {
@@ -1022,6 +1022,102 @@ async fn completion_guard_continues_promised_research_until_a_read_is_observed()
     let trace = agent.completion_guard_trace().unwrap();
     assert_eq!(trace.attempts.len(), 2);
     assert!(trace.render_compact().starts_with("accepted"));
+}
+
+#[tokio::test]
+async fn inspection_batching_records_dependent_serial_and_parallel_turns() {
+    let fixture = TestFixture::new();
+    let mut responses = Vec::new();
+    for index in 0..4 {
+        responses.push(Ok(StreamedResponse {
+            content: if index == 3 {
+                "Inspection dependency: previous search identified this target".to_string()
+            } else {
+                String::new()
+            },
+            tool_calls: vec![test_tool_call(
+                &format!("read-{index}"),
+                "read",
+                &format!(r#"{{"path":"file{index}.rs"}}"#),
+            )],
+            ..StreamedResponse::default()
+        }));
+    }
+    responses.push(Ok(StreamedResponse {
+        tool_calls: vec![
+            test_tool_call("read-a", "read", r#"{"path":"a.rs"}"#),
+            test_tool_call("read-b", "read", r#"{"path":"b.rs"}"#),
+        ],
+        ..StreamedResponse::default()
+    }));
+    responses.push(finished_response(
+        "The inspection is complete; no changes are needed.",
+    ));
+    let provider = MockProvider::new(responses);
+    let requests = provider.requests();
+    let mut registry = ToolRegistry::new();
+    for name in [
+        "file0.rs", "file1.rs", "file2.rs", "file3.rs", "a.rs", "b.rs",
+    ] {
+        std::fs::write(fixture.project_root.join(name), format!("// {name}\n")).unwrap();
+    }
+    registry.register(Arc::new(crate::tool::ReadTool::new(
+        fixture.project_root.clone(),
+        fixture.read_tracker.clone(),
+    )));
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent
+        .run(
+            "Inspect the sources; do not modify files",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+    let diagnostics: Vec<_> = agent
+        .usage
+        .usage_turns
+        .iter()
+        .filter_map(|turn| turn.inspection_batch.as_ref())
+        .collect();
+    assert_eq!(diagnostics.len(), 5);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|row| row.advisory_emitted)
+            .count(),
+        1
+    );
+    assert!(diagnostics[2].advisory_emitted);
+    assert_eq!(
+        diagnostics[3].classification,
+        InspectionBatchClass::Dependent
+    );
+    assert!(
+        diagnostics[3]
+            .dependency_reason
+            .as_ref()
+            .unwrap()
+            .contains("previous search")
+    );
+    assert_eq!(diagnostics[4].classification, InspectionBatchClass::Batched);
+    assert_eq!(diagnostics[4].planned_widths, vec![2]);
+    assert_eq!(diagnostics[4].actual_widths, vec![2]);
+    assert_eq!(diagnostics[4].singleton_streak, 0);
+    let requests = requests.lock().await;
+    assert!(
+        requests[3]
+            .iter()
+            .any(|message| message_content(message).contains("Inspection batching advisory:"))
+    );
 }
 
 #[tokio::test]
@@ -3883,6 +3979,7 @@ async fn restored_usage_turns_appear_in_context_report() {
         inspection_returned_chars: 4_000,
         inspection_avoided_chars: 8_000,
         delegated_parent_overlap: 1,
+        inspection_batch: None,
     }]);
 
     let report = agent.context_report();
