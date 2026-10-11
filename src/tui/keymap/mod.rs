@@ -1366,6 +1366,7 @@ mod tests {
                     self_review: Default::default(),
                     quality_evidence: Default::default(),
                     inspection: Default::default(),
+                    runtime: Default::default(),
                     lifetime: Default::default(),
                 }),
                 tab: UsageTab::Activity,

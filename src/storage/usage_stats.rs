@@ -189,6 +189,8 @@ pub struct UsageDashboard {
     /// Inspection-batching telemetry for the `/usage` report (issue #143),
     /// measured over the trailing cohort window.
     pub inspection: super::InspectionBatchingStats,
+    /// Run time split into work and waiting, across every task run (#146).
+    pub runtime: super::RuntimeTiming,
     pub lifetime: LifetimeTotals,
 }
 
@@ -254,6 +256,7 @@ impl Storage {
                 now_ms(),
             )))
             .await?;
+        let runtime = self.runtime_timing().await?;
         let lifetime = self.load_lifetime_totals().await?;
         Ok(UsageDashboard {
             today,
@@ -268,6 +271,7 @@ impl Storage {
             self_review,
             quality_evidence,
             inspection,
+            runtime,
             lifetime,
         })
     }
@@ -602,6 +606,7 @@ mod derived_tests {
             self_review: Default::default(),
             quality_evidence: Default::default(),
             inspection: Default::default(),
+            runtime: Default::default(),
             lifetime: LifetimeTotals::default(),
         }
     }

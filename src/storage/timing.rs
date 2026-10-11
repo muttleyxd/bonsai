@@ -50,17 +50,57 @@ impl TaskRunTiming {
     }
 }
 
-/// Session-level timing rollup across the session's task runs.
-///
-/// Session-level reporting consumes this in a follow-up slice; until then the
-/// rollup is exercised by tests only, so it stays out of the shipped build.
-#[cfg(test)]
+/// Runtime totals summed across every task run of a task session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct SessionTimingTotals {
-    pub(crate) wall_ms: i64,
-    pub(crate) critical_path_ms: i64,
-    pub(crate) active_compute_ms: i64,
-    pub(crate) waiting_ms: i64,
+pub struct RuntimeTimingTotals {
+    /// Run clock elapsed across every recorded segment.
+    pub wall_ms: i64,
+    /// Union of every interval: what the runs actually took.
+    pub critical_path_ms: i64,
+    /// Model, active tool, and child-active time.
+    pub active_compute_ms: i64,
+    /// Queue, permission, user, and child-wait time.
+    pub waiting_ms: i64,
+}
+
+/// The runtime breakdown the `/usage` report renders (issue #146).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeTiming {
+    pub totals: RuntimeTimingTotals,
+    /// Summed resource time per category, in report order.
+    pub categories: Vec<(TimingCategory, i64)>,
+}
+
+impl RuntimeTiming {
+    /// The runtime breakdown for one cohort of task runs.
+    pub fn new(totals: RuntimeTimingTotals, categories: Vec<(TimingCategory, i64)>) -> Self {
+        Self { totals, categories }
+    }
+
+    /// Summed resource time in one category.
+    pub fn category_ms(&self, category: TimingCategory) -> i64 {
+        self.categories
+            .iter()
+            .find(|(kind, _)| *kind == category)
+            .map_or(0, |(_, ms)| *ms)
+    }
+
+    /// Share of run wall time that went to waiting rather than working. This is
+    /// the number the active-compute budget policy exists to keep visible: a
+    /// run cannot spend most of its wall clock waiting and still read as
+    /// expensive work.
+    pub fn waiting_share_percent(&self) -> Option<u8> {
+        if self.totals.wall_ms <= 0 {
+            return None;
+        }
+        let percent = self.totals.waiting_ms.saturating_mul(100) / self.totals.wall_ms;
+        Some(u8::try_from(percent).unwrap_or(100))
+    }
+
+    /// Whether any run recorded timing at all.
+    pub fn has_data(&self) -> bool {
+        self.totals.wall_ms > 0 || !self.categories.is_empty()
+    }
 }
 
 impl Storage {
@@ -237,29 +277,48 @@ impl Storage {
         Ok(Some(timing))
     }
 
-    /// Timing totals across every task run of one session.
-    #[cfg(test)]
-    pub(crate) async fn session_timing_totals(
-        &self,
-        session_id: SessionId,
-    ) -> Result<SessionTimingTotals> {
+    /// Runtime totals and per-category resource time across every task run.
+    ///
+    /// Two sums with no JSON decode, so unlike the inspection cohort this can
+    /// cover all history without costing the modal its interactive latency.
+    pub(crate) async fn runtime_timing(&self) -> Result<RuntimeTiming> {
         let row = sqlx::query(
-            "SELECT COALESCE(SUM(wall_ms), 0) AS wall_ms, \
-             COALESCE(SUM(critical_path_ms), 0) AS critical_path_ms, \
-             COALESCE(SUM(active_compute_ms), 0) AS active_compute_ms, \
-             COALESCE(SUM(wait_ms), 0) AS wait_ms \
-             FROM task_runs WHERE session_id = ?",
+            "SELECT COALESCE(SUM(r.wall_ms), 0) AS wall_ms, \
+             COALESCE(SUM(r.critical_path_ms), 0) AS critical_path_ms, \
+             COALESCE(SUM(r.active_compute_ms), 0) AS active_compute_ms, \
+             COALESCE(SUM(r.wait_ms), 0) AS wait_ms \
+             FROM task_runs r JOIN sessions s ON s.id = r.session_id \
+             WHERE s.kind = 'task'",
         )
-        .bind(session_id.as_i64())
         .fetch_one(&self.pool)
         .await
-        .with_context(|| format!("Failed to load session timing totals for {session_id}"))?;
-        Ok(SessionTimingTotals {
+        .context("Failed to load runtime timing totals")?;
+        let totals = RuntimeTimingTotals {
             wall_ms: row.try_get("wall_ms")?,
             critical_path_ms: row.try_get("critical_path_ms")?,
             active_compute_ms: row.try_get("active_compute_ms")?,
             waiting_ms: row.try_get("wait_ms")?,
-        })
+        };
+
+        let rows = sqlx::query(
+            "SELECT t.category AS category, SUM(t.summed_ms) AS summed_ms \
+             FROM task_run_timings t JOIN task_runs r ON r.id = t.task_run_id \
+             JOIN sessions s ON s.id = r.session_id \
+             WHERE s.kind = 'task' GROUP BY 1",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to load runtime timing categories")?;
+        let mut categories = Vec::with_capacity(rows.len());
+        for row in rows {
+            let raw: String = row.try_get("category")?;
+            let Some(category) = TimingCategory::from_db_str(&raw) else {
+                continue;
+            };
+            categories.push((category, row.try_get("summed_ms")?));
+        }
+        categories.sort_by_key(|(category, _)| *category);
+        Ok(RuntimeTiming::new(totals, categories))
     }
 
     /// Abandon the timing intervals a dead process left open on this session.
@@ -569,14 +628,12 @@ mod tests {
                 .unwrap();
         }
 
-        let totals = fixture
-            .storage
-            .session_timing_totals(session)
-            .await
-            .unwrap();
-        assert_eq!(totals.active_compute_ms, 1_300);
-        assert_eq!(totals.waiting_ms, 5_200);
-        assert_eq!(totals.wall_ms, 6_500);
+        let runtime = fixture.storage.runtime_timing().await.unwrap();
+        assert_eq!(runtime.totals.active_compute_ms, 1_300);
+        assert_eq!(runtime.totals.waiting_ms, 5_200);
+        assert_eq!(runtime.totals.wall_ms, 6_500);
+        assert_eq!(runtime.category_ms(TimingCategory::ToolActive), 1_300);
+        assert_eq!(runtime.waiting_share_percent(), Some(80));
     }
 
     #[tokio::test]

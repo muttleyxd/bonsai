@@ -83,6 +83,65 @@ fn usage_body_lines(
     }
 }
 
+fn runtime_line(runtime: &crate::storage::RuntimeTiming) -> Line<'static> {
+    let palette = theme::palette();
+    // Read the totals through their own type so the report cannot silently drift
+    // from the persisted split.
+    let crate::storage::RuntimeTimingTotals {
+        wall_ms,
+        critical_path_ms,
+        active_compute_ms,
+        waiting_ms,
+    } = runtime.totals;
+    let mut spans = vec![
+        Span::styled(" Runtime ", theme::muted()),
+        Span::styled(
+            format!(
+                "active compute {} · waiting {}",
+                format_duration_units(active_compute_ms),
+                format_duration_units(waiting_ms),
+            ),
+            theme::label(palette.text),
+        ),
+    ];
+    if let Some(percent) = runtime.waiting_share_percent() {
+        spans.push(Span::styled(" · ", theme::muted()));
+        spans.push(Span::styled(
+            format!("{percent}% of run time waiting"),
+            theme::label(palette.text),
+        ));
+    }
+    if wall_ms > 0 {
+        spans.push(Span::styled(" · run wall ", theme::muted()));
+        spans.push(Span::styled(
+            format_duration_units(wall_ms),
+            theme::label(palette.text),
+        ));
+    }
+    if critical_path_ms > 0 {
+        spans.push(Span::styled(" · critical path ", theme::muted()));
+        spans.push(Span::styled(
+            format_duration_units(critical_path_ms),
+            theme::label(palette.text),
+        ));
+    }
+    // The category split is what makes the total actionable: model and tool
+    // time is what a budget is meant to consume, so it has to be separable
+    // from queue and human waits rather than summed with them.
+    let parts: Vec<String> = crate::timing::TimingCategory::ALL
+        .iter()
+        .filter_map(|category| {
+            let ms = runtime.category_ms(*category);
+            (ms > 0).then(|| format!("{} {}", category.label(), format_duration_units(ms)))
+        })
+        .collect();
+    if !parts.is_empty() {
+        spans.push(Span::styled(" · ", theme::muted()));
+        spans.push(Span::styled(parts.join(" · "), theme::label(palette.text)));
+    }
+    Line::from(spans)
+}
+
 fn inspection_line(stats: &crate::storage::InspectionBatchingStats) -> Line<'static> {
     let palette = theme::palette();
     let share = stats
@@ -191,6 +250,9 @@ fn activity_lines(dashboard: &UsageDashboard, inner_width: usize) -> Vec<Line<'s
         ));
     }
     lines.push(Line::from(stats));
+    if dashboard.runtime.has_data() {
+        lines.push(runtime_line(&dashboard.runtime));
+    }
     if dashboard.inspection.has_data() {
         lines.push(inspection_line(&dashboard.inspection));
     }
@@ -435,6 +497,32 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn runtime_line_separates_work_from_waiting() {
+        let runtime = crate::storage::RuntimeTiming::new(
+            crate::storage::RuntimeTimingTotals {
+                wall_ms: 100_000,
+                critical_path_ms: 90_000,
+                active_compute_ms: 25_000,
+                waiting_ms: 75_000,
+            },
+            vec![
+                (crate::timing::TimingCategory::ModelRequest, 20_000),
+                (crate::timing::TimingCategory::ToolActive, 5_000),
+                (crate::timing::TimingCategory::UserWait, 75_000),
+            ],
+        );
+        let rendered = line_text(runtime_line(&runtime));
+        assert!(rendered.contains("Runtime"), "{rendered}");
+        // The split is the point: waiting must not read as work.
+        assert!(rendered.contains("active compute"), "{rendered}");
+        assert!(rendered.contains("75% of run time waiting"), "{rendered}");
+        assert!(rendered.contains("model "), "{rendered}");
+        // A wait category is named, not folded into the tool total.
+        assert!(rendered.contains("user wait "), "{rendered}");
+        assert!(!crate::storage::RuntimeTiming::default().has_data());
     }
 
     #[test]

@@ -86,6 +86,7 @@ pub(crate) use recovery::{NewRecoveryPoint, RecoveryId, RecoveryPoint, RecoveryS
 pub use session_kind::{SessionKind, SessionListScope};
 pub use task_runs::{TaskOutcome, TaskRun, TaskRunId, TaskTerminalReason, TaskTerminalReasonCode};
 pub(crate) use timing::TaskRunTiming;
+pub use timing::{RuntimeTiming, RuntimeTimingTotals};
 pub use usage_stats::{
     DailyUsage, LocalToday, ModelUsage, QualityEvidenceIntegrity, UsageDashboard,
 };
