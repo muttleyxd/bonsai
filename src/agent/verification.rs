@@ -982,6 +982,10 @@ impl Agent {
 
         let (check_status, exit_code) = verification_check_outcome(result, status);
         let binding_blocker = binding_terminal_reason(&binding);
+        // A result the cross-process scheduler produced or reused carries the
+        // attempt's key, which binds this session's own evidence to that shared
+        // attempt instead of looking like an unexplained copy of it.
+        let shared_job_key = shared_verification_job_key(result);
         let now = crate::util::time::now_ms();
         let failure_signature = (check_status != VerificationCheckStatus::Passed)
             .then(|| verification_failure_signature(command, result, check_status));
@@ -1014,6 +1018,7 @@ impl Agent {
             check.attempt_count = check.attempt_count.saturating_add(1);
             check.attempt_timestamps_ms.push(now);
             check.delivered_binding = None;
+            check.shared_job_key = shared_job_key.clone();
             if let Some(signature) = failure_signature.as_ref() {
                 check.last_failure_signature = Some(signature.clone());
                 check.failure_signatures.push(signature.clone());
@@ -1054,6 +1059,7 @@ impl Agent {
             existing.finished_at_ms = Some(now);
             existing.observed_final_workspace = binding_blocker.is_none().then_some(true);
             existing.delivered_workspace_binding = None;
+            existing.shared_job_key = shared_job_key;
             return;
         }
         let terminal_reason_kind = binding_blocker;
@@ -1084,6 +1090,7 @@ impl Agent {
                     attempt_timestamps_ms: vec![now],
                     failure_signatures,
                     terminal_reason_kind,
+                    shared_job_key: shared_job_key.clone(),
                 }],
                 started_at_ms: now,
                 finished_at_ms: Some(now),
@@ -1094,6 +1101,7 @@ impl Agent {
                 terminal_reason: None,
                 terminal_reason_kind,
                 delivered_workspace_binding: None,
+                shared_job_key,
             });
         self.verification
             .observed_verification_run_indices
@@ -1189,6 +1197,7 @@ impl Agent {
                     attempt_timestamps_ms: Vec::new(),
                     failure_signatures: Vec::new(),
                     terminal_reason_kind: Some(reason),
+                    shared_job_key: None,
                 }],
                 started_at_ms: now,
                 finished_at_ms: Some(now),
@@ -1199,6 +1208,7 @@ impl Agent {
                 terminal_reason: Some(message.to_string()),
                 terminal_reason_kind: Some(reason),
                 delivered_workspace_binding: None,
+                shared_job_key: None,
             });
     }
 
@@ -1434,6 +1444,20 @@ fn observed_verification_kind(command: &str) -> Option<VerificationKind> {
         saw_build = true;
     }
     saw_build.then_some(VerificationKind::Build)
+}
+
+fn shared_verification_job_key(result: &ToolOutput) -> Option<String> {
+    let ToolOutput::Command { rendered, .. } = result else {
+        return None;
+    };
+    rendered.lines().find_map(|line| {
+        let rest = line
+            .trim()
+            .strip_prefix(crate::verification_scheduler::SHARED_VERIFICATION_MARKER)?;
+        rest.split_whitespace()
+            .find_map(|field| field.strip_prefix("job="))
+            .map(str::to_string)
+    })
 }
 
 fn verification_check_outcome(

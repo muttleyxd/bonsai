@@ -643,6 +643,7 @@ fn sample_verification_run(
             attempt_timestamps_ms: vec![started_at_ms + 10],
             failure_signatures: Vec::new(),
             terminal_reason_kind: None,
+            shared_job_key: None,
         }],
         started_at_ms,
         finished_at_ms: Some(started_at_ms + 20),
@@ -653,6 +654,7 @@ fn sample_verification_run(
         terminal_reason: None,
         terminal_reason_kind: None,
         delivered_workspace_binding: None,
+        shared_job_key: None,
     }
 }
 

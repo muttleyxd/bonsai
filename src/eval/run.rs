@@ -779,6 +779,7 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
             yolo_mode: yolo_mode.clone(),
             sandbox: crate::sandbox::CommandSandbox::disabled(),
             workspace_locks,
+            verification_scheduler: crate::tool::VerificationSchedulerContext::disabled(),
             session_title: crate::bootstrap::SessionTitleToolDeps {
                 storage: config.storage.clone(),
                 active_session_id,

@@ -58,6 +58,7 @@ mod tui;
 mod update;
 mod util;
 mod verification;
+mod verification_scheduler;
 mod workspace_trust;
 mod yolo;
 

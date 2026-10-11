@@ -62,6 +62,7 @@ mod todos;
 mod transcript;
 mod usage_stats;
 mod verification;
+mod verification_jobs;
 mod workspace_locks;
 
 pub(crate) use authorization::{AuthorizationDecisionRecord, NewAuthorizationDecision};
@@ -83,6 +84,10 @@ pub use session_kind::{SessionKind, SessionListScope};
 pub use task_runs::{TaskOutcome, TaskRun, TaskRunId, TaskTerminalReason, TaskTerminalReasonCode};
 pub use usage_stats::{
     DailyUsage, LocalToday, ModelUsage, QualityEvidenceIntegrity, UsageDashboard,
+};
+pub(crate) use verification_jobs::{
+    VERIFICATION_JOB_LEASE_MS, VERIFICATION_JOB_RETENTION_MS, VerificationJobClaim,
+    VerificationJobPayload, VerificationJobRequest, VerificationJobState,
 };
 pub(crate) use workspace_locks::WorkspaceLeaseFence;
 pub use workspace_locks::WorkspaceLockGuard;

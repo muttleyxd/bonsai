@@ -112,6 +112,7 @@ async fn verification_runs_roundtrip_with_check_and_workspace_evidence() {
             attempt_timestamps_ms: vec![1_700_000_000_050, 1_700_000_000_100],
             failure_signatures: vec!["failure-a".to_string()],
             terminal_reason_kind: None,
+            shared_job_key: None,
         }],
         started_at_ms: 1_700_000_000_000,
         finished_at_ms: Some(1_700_000_000_200),
@@ -128,6 +129,7 @@ async fn verification_runs_roundtrip_with_check_and_workspace_evidence() {
         terminal_reason: Some("workspace changed after verification".to_string()),
         terminal_reason_kind: Some(crate::verification::VerificationTerminalReason::UserSkipped),
         delivered_workspace_binding: Some(binding),
+        shared_job_key: None,
     }];
 
     fixture
@@ -431,6 +433,7 @@ fn sample_verification_evidence(
             attempt_timestamps_ms: vec![started_at_ms + 10],
             failure_signatures: Vec::new(),
             terminal_reason_kind: None,
+            shared_job_key: None,
         }],
         started_at_ms,
         finished_at_ms: Some(started_at_ms + 20),
@@ -441,6 +444,7 @@ fn sample_verification_evidence(
         terminal_reason: None,
         terminal_reason_kind: None,
         delivered_workspace_binding: None,
+        shared_job_key: None,
     }
 }
 
@@ -2395,7 +2399,7 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     // 0001 is the frozen 1.0 baseline (sqlx checksums applied migrations —
     // editing it bricks existing databases); every schema change after it is
     // an additive migration. Bump alongside each new migrations/*.sql file.
-    assert_eq!(migration_count, 9);
+    assert_eq!(migration_count, 10);
 
     let builtin_subagent_settings_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master \

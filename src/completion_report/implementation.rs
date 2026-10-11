@@ -976,6 +976,7 @@ mod tests {
             terminal_reason: None,
             terminal_reason_kind: None,
             delivered_workspace_binding: None,
+            shared_job_key: None,
         };
         assert_eq!(
             classify_completion_status(
@@ -1016,6 +1017,7 @@ mod tests {
             terminal_reason: Some("arbitrary prose".to_string()),
             terminal_reason_kind: None,
             delivered_workspace_binding: None,
+            shared_job_key: None,
         };
 
         let evidence = completion_verification_evidence(Some(&run)).expect("evidence");

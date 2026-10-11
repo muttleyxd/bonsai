@@ -65,6 +65,9 @@ pub(crate) struct ToolRegistryDeps {
     pub(crate) yolo_mode: crate::yolo::YoloMode,
     pub(crate) sandbox: crate::sandbox::CommandSandbox,
     pub(crate) workspace_locks: crate::tool::WorkspaceLockContext,
+    /// Cross-process verification scheduler. `disabled` keeps every Bash tool on
+    /// the ordinary execution path.
+    pub(crate) verification_scheduler: crate::tool::VerificationSchedulerContext,
     pub(crate) session_title: SessionTitleToolDeps,
     pub(crate) skills: crate::resource::skill::SharedSkillRegistry,
     /// Provider factory for nested subagents. `None` disables the `agent`
@@ -351,6 +354,7 @@ pub(crate) fn build_tool_registries(
         yolo_mode,
         sandbox,
         workspace_locks,
+        verification_scheduler,
         session_title,
         skills,
         subagent_provider_factory,
@@ -498,7 +502,8 @@ pub(crate) fn build_tool_registries(
                     sandbox.clone(),
                     hooks.clone(),
                     authorization_ledger.clone(),
-                ),
+                )
+                .with_verification_scheduler(verification_scheduler.clone()),
             ))),
         );
         full_sub_instances.insert(ToolFactoryKey::Terminal, terminal_tool.clone());
@@ -592,7 +597,8 @@ pub(crate) fn build_tool_registries(
             sandbox.clone(),
             hooks.clone(),
             authorization_ledger.clone(),
-        ),
+        )
+        .with_verification_scheduler(verification_scheduler),
     )));
     let mut coding_instances = ToolInstances::default();
     coding_instances.insert(ToolFactoryKey::ProjectInfo, project_info_tool.clone());
@@ -1008,6 +1014,7 @@ mod tests {
             background_wakes_parkable: false,
             yolo_mode: crate::yolo::YoloMode::new(),
             sandbox: crate::sandbox::CommandSandbox::disabled(),
+            verification_scheduler: crate::tool::VerificationSchedulerContext::disabled(),
             workspace_locks: crate::tool::WorkspaceLockContext::disabled(
                 temp_dir.path().to_path_buf(),
             ),
@@ -1275,6 +1282,7 @@ mod tests {
             background_wakes_parkable: false,
             yolo_mode: crate::yolo::YoloMode::new(),
             sandbox: crate::sandbox::CommandSandbox::disabled(),
+            verification_scheduler: crate::tool::VerificationSchedulerContext::disabled(),
             workspace_locks: crate::tool::WorkspaceLockContext::disabled(
                 temp_dir.path().to_path_buf(),
             ),
@@ -1338,6 +1346,7 @@ mod tests {
             background_wakes_parkable: false,
             yolo_mode: crate::yolo::YoloMode::new(),
             sandbox: crate::sandbox::CommandSandbox::disabled(),
+            verification_scheduler: crate::tool::VerificationSchedulerContext::disabled(),
             workspace_locks: crate::tool::WorkspaceLockContext::disabled(
                 temp_dir.path().to_path_buf(),
             ),
@@ -1405,6 +1414,7 @@ mod tests {
                 background_wakes_parkable: false,
                 yolo_mode: crate::yolo::YoloMode::new(),
                 sandbox: crate::sandbox::CommandSandbox::disabled(),
+                verification_scheduler: crate::tool::VerificationSchedulerContext::disabled(),
                 workspace_locks: crate::tool::WorkspaceLockContext::disabled(
                     temp_dir.path().to_path_buf(),
                 ),
@@ -1555,6 +1565,7 @@ mod tests {
             background_wakes_parkable: false,
             yolo_mode: crate::yolo::YoloMode::new(),
             sandbox: crate::sandbox::CommandSandbox::disabled(),
+            verification_scheduler: crate::tool::VerificationSchedulerContext::disabled(),
             workspace_locks: crate::tool::WorkspaceLockContext::disabled(
                 temp_dir.path().to_path_buf(),
             ),

@@ -52,9 +52,9 @@ impl Storage {
                       session_id, seq, kind, status, started_at_ms, finished_at_ms,
                       observed_final_workspace, workspace_changes_json, repair_attempts,
                       reasoning_escalations_json, terminal_reason, terminal_reason_kind,
-                      delivered_binding_json
+                      delivered_binding_json, shared_job_key
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     "#,
                 )
                 .bind(session_id.as_i64())
@@ -73,7 +73,8 @@ impl Storage {
                         .as_ref()
                         .map(VerificationTerminalReason::label)
                 )
-                .bind(delivered_binding_json),
+                .bind(delivered_binding_json)
+                .bind(&run.shared_job_key),
             )?;
 
             for (check_seq, check) in run.checks.iter().enumerate() {
@@ -104,9 +105,9 @@ impl Storage {
                           tool_call_id, exit_code, completed_at_ms, attempt_count,
                           last_failure_signature, binding_json, delivered_binding_json,
                           attempt_timestamps_json,
-                          failure_signatures_json, terminal_reason_kind
+                          failure_signatures_json, terminal_reason_kind, shared_job_key
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         "#,
                     )
                     .bind(session_id.as_i64())
@@ -129,7 +130,8 @@ impl Storage {
                             .terminal_reason_kind
                             .as_ref()
                             .map(VerificationTerminalReason::label)
-                    ),
+                    )
+                    .bind(&check.shared_job_key),
                 )?;
             }
         }
@@ -144,7 +146,7 @@ impl Storage {
             "SELECT seq, kind, status, started_at_ms, finished_at_ms, \
              observed_final_workspace, workspace_changes_json, repair_attempts, \
              reasoning_escalations_json, terminal_reason, terminal_reason_kind, \
-             delivered_binding_json \
+             delivered_binding_json, shared_job_key \
              FROM verification_runs WHERE session_id = ? ORDER BY seq",
         )
         .bind(session_id.as_i64())
@@ -161,7 +163,7 @@ impl Storage {
                 "SELECT name, command, status, tool_call_id, exit_code, completed_at_ms, \
                  attempt_count, last_failure_signature, binding_json, delivered_binding_json, \
                  attempt_timestamps_json, \
-                 failure_signatures_json, terminal_reason_kind \
+                 failure_signatures_json, terminal_reason_kind, shared_job_key \
                  FROM verification_checks \
                  WHERE session_id = ? AND run_seq = ? ORDER BY seq",
             )
@@ -217,6 +219,7 @@ impl Storage {
                                 })
                             })
                             .transpose()?,
+                        shared_job_key: check_row.try_get("shared_job_key")?,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -255,6 +258,7 @@ impl Storage {
                     .map(serde_json::from_str)
                     .transpose()
                     .context("Failed to parse delivered verification binding")?,
+                shared_job_key: row.try_get("shared_job_key")?,
             });
         }
         Ok(runs)

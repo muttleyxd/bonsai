@@ -129,7 +129,7 @@ pub(super) fn capture_verification_workspace_binding<'a>(
     })
 }
 
-async fn capture_verification_workspace_identity(
+pub(crate) async fn capture_verification_workspace_identity(
     root: &Path,
     command_cwd: &Path,
     command: &str,

@@ -1936,6 +1936,7 @@ mod read_persistence;
 mod retry;
 mod run_loop;
 mod run_loop_executor;
+pub(crate) use run_loop_executor::capture_verification_workspace_identity;
 mod self_review;
 mod text;
 mod transcript;

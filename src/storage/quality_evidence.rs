@@ -63,6 +63,10 @@ impl Storage {
     /// Count verification rows whose exact session-agnostic fingerprints occur
     /// in more than one durable session. Every member of such a group is
     /// quarantined because persisted data cannot prove which row was original.
+    ///
+    /// Evidence the verification scheduler linked to a shared attempt is
+    /// excluded: two sessions reporting the same attempt's result is exactly
+    /// what the scheduler is for, so it is not an unexplained copy.
     pub(super) async fn load_quarantined_verification_run_count(&self) -> Result<i64> {
         let candidate_rows = sqlx::query(
             r#"
@@ -90,6 +94,7 @@ impl Storage {
                 self.load_verification_runs(session_id)
                     .await?
                     .into_iter()
+                    .filter(|run| run.shared_job_key.is_none())
                     .map(|run| (session_id, run)),
             );
         }

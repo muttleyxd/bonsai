@@ -113,6 +113,10 @@ pub struct BashTool {
     pub(in crate::tool::bash) authorization_ledger: AuthorizationLedger,
     pub(in crate::tool::bash) capability: BashCapability,
     verification_cache: Arc<Mutex<HashMap<VerificationCacheKey, CachedVerificationOutput>>>,
+    /// Cross-process verification scheduler. `None` keeps this tool on the plain
+    /// Bash path, which is what test runtimes and the eval runner use.
+    pub(in crate::tool::bash) verification_scheduler:
+        Option<crate::tool::VerificationSchedulerContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -139,6 +143,7 @@ pub(crate) struct BashExecutionPolicy {
     hooks: Arc<crate::hooks::HookEngine>,
     authorization_ledger: AuthorizationLedger,
     verification_cache: Arc<Mutex<HashMap<VerificationCacheKey, CachedVerificationOutput>>>,
+    verification_scheduler: Option<crate::tool::VerificationSchedulerContext>,
 }
 
 impl BashExecutionPolicy {
@@ -154,7 +159,19 @@ impl BashExecutionPolicy {
             hooks,
             authorization_ledger,
             verification_cache: Arc::new(Mutex::new(HashMap::new())),
+            verification_scheduler: None,
         }
+    }
+
+    /// Coordinate recognized verification checks across Bonsai processes through
+    /// the shared store. Without this every check runs ordinarily.
+    #[must_use]
+    pub(crate) fn with_verification_scheduler(
+        mut self,
+        scheduler: crate::tool::VerificationSchedulerContext,
+    ) -> Self {
+        self.verification_scheduler = Some(scheduler);
+        self
     }
 }
 
@@ -300,6 +317,7 @@ impl BashTool {
             hooks,
             authorization_ledger,
             verification_cache,
+            verification_scheduler,
         } = execution_policy;
         let canonical_project_root = project_root
             .canonicalize()
@@ -324,6 +342,7 @@ impl BashTool {
             authorization_ledger,
             capability: BashCapability::Coding,
             verification_cache,
+            verification_scheduler,
         }
     }
 
@@ -350,6 +369,7 @@ impl BashTool {
             authorization_ledger: self.authorization_ledger.clone(),
             capability: self.capability,
             verification_cache: self.verification_cache.clone(),
+            verification_scheduler: self.verification_scheduler.clone(),
         }
     }
 
@@ -840,6 +860,26 @@ impl BashTool {
             });
         }
 
+        // A recognized, single Cargo verification command may be coordinated
+        // with other Bonsai processes; everything else keeps ordinary execution.
+        let schedulable = self.verification_scheduler.is_some()
+            && planning_command.is_none()
+            && canonical_check.is_none()
+            && direct_verification.is_some()
+            && !interactive
+            && !run_in_background;
+        let scheduled = if schedulable {
+            self.run_scheduled_verification(
+                &command,
+                &cwd,
+                timeout_secs,
+                escape.escaped(),
+                context.clone(),
+            )
+            .await
+        } else {
+            None
+        };
         let CommandResult {
             mut stdout,
             mut stderr,
@@ -850,18 +890,23 @@ impl BashTool {
             summary,
             confined,
             cargo_output,
-        } = self
-            .run_command(
-                &command,
-                &cwd,
-                timeout_secs,
-                escape.escaped(),
-                planning_command
-                    .as_ref()
-                    .is_some_and(|command| command.permits_network()),
-                context.clone(),
-            )
-            .await?;
+        } = match scheduled {
+            Some(result) => result?,
+            None => {
+                self.run_command(
+                    &command,
+                    &cwd,
+                    timeout_secs,
+                    escape.escaped(),
+                    planning_command
+                        .as_ref()
+                        .is_some_and(|command| command.permits_network()),
+                    context.clone(),
+                    None,
+                )
+                .await?
+            }
+        };
 
         if canonical_check.is_some() {
             body = cargo_output.unwrap_or_else(|| {
@@ -1865,6 +1910,7 @@ mod tests {
                 5,
                 false,
                 planning.permits_network(),
+                None,
                 None,
             )
             .await

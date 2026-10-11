@@ -259,6 +259,10 @@ pub(crate) struct VerificationCheckRecord {
     pub(crate) attempt_timestamps_ms: Vec<i64>,
     pub(crate) failure_signatures: Vec<String>,
     pub(crate) terminal_reason_kind: Option<VerificationTerminalReason>,
+    /// The shared cross-process attempt this check's evidence came from, when it
+    /// was produced or reused by the verification scheduler. Linked evidence is
+    /// authoritative for this session and is not an accidental duplicate.
+    pub(crate) shared_job_key: Option<String>,
 }
 
 /// Evidence that a failed repair caused one request-local reasoning increase.
@@ -287,6 +291,9 @@ pub(crate) struct VerificationRunRecord {
     pub(crate) terminal_reason: Option<String>,
     pub(crate) terminal_reason_kind: Option<VerificationTerminalReason>,
     pub(crate) delivered_workspace_binding: Option<VerificationBinding>,
+    /// The shared cross-process attempt this run's evidence came from, when the
+    /// scheduler produced or reused it.
+    pub(crate) shared_job_key: Option<String>,
 }
 
 impl VerificationRunRecord {
@@ -310,6 +317,7 @@ impl VerificationRunRecord {
                     attempt_timestamps_ms: Vec::new(),
                     failure_signatures: Vec::new(),
                     terminal_reason_kind: None,
+                    shared_job_key: None,
                 })
                 .collect(),
             started_at_ms: crate::util::time::now_ms(),
@@ -321,6 +329,7 @@ impl VerificationRunRecord {
             terminal_reason: None,
             terminal_reason_kind: None,
             delivered_workspace_binding: None,
+            shared_job_key: None,
         }
     }
 }
