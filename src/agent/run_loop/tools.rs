@@ -21,6 +21,7 @@ impl Agent {
         tool_origin: Option<String>,
         max_tool_duration: Option<Duration>,
         remaining_billed_tokens: Option<u64>,
+        timing: crate::timing::SharedTimingLedger,
     ) -> Vec<(ToolCall, ToolOutput, crate::output::ToolExecutionStatus)> {
         let started_calls = batch
             .iter()
@@ -53,6 +54,7 @@ impl Agent {
                     tool_origin.clone(),
                     max_tool_duration,
                     remaining_billed_tokens,
+                    timing.clone(),
                 ),
             )
         }));
@@ -82,6 +84,7 @@ impl Agent {
         tool_origin: Option<String>,
         max_tool_duration: Option<Duration>,
         remaining_billed_tokens: Option<u64>,
+        timing: crate::timing::SharedTimingLedger,
     ) -> (ToolCall, ToolOutput, crate::output::ToolExecutionStatus) {
         sink.thinking(&format!("Running {}", tool_call.name));
 
@@ -206,7 +209,8 @@ impl Agent {
             let mut context =
                 crate::tool::ToolExecutionContext::new(tool_call.id.clone(), sink.clone())
                     .with_cancellation_token(tool_cancellation.clone())
-                    .with_remaining_billed_tokens(remaining_billed_tokens);
+                    .with_remaining_billed_tokens(remaining_billed_tokens)
+                    .with_timing(timing);
             if let Some(background_wakes) = background_wakes {
                 context = context.with_background_wakes(background_wakes);
             }

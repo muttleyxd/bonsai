@@ -831,6 +831,7 @@ impl Agent {
                     self.tool_origin.clone(),
                     self.budget.max_tool_duration,
                     remaining_billed_tokens,
+                    self.timing.clone(),
                 )
                 .await
             };
@@ -3672,6 +3673,9 @@ mod tests {
             None,
             Some(Duration::from_millis(10)),
             None,
+            std::sync::Arc::new(crate::timing::TimingLedger::system(
+                crate::timing::TimingPolicy::ActiveCompute,
+            )),
         )
         .await;
 
@@ -3703,6 +3707,9 @@ mod tests {
             None,
             Some(Duration::ZERO),
             None,
+            std::sync::Arc::new(crate::timing::TimingLedger::system(
+                crate::timing::TimingPolicy::ActiveCompute,
+            )),
         )
         .await;
 
@@ -5079,6 +5086,9 @@ mod tests {
                 None,
                 None,
                 None,
+                std::sync::Arc::new(crate::timing::TimingLedger::system(
+                    crate::timing::TimingPolicy::ActiveCompute,
+                )),
             )
             .await;
             results.push((output, status));

@@ -169,39 +169,19 @@ impl TasksTool {
         let output = match args.action {
             TaskAction::List => ToolOutput::Text(self.list_all().await),
             TaskAction::Wait => {
-                let wait_seconds = args
-                    .wait_seconds
-                    .map(|seconds| seconds.min(MAX_WAIT_SECONDS));
-                // Treat an empty/whitespace task_id the same as an omitted one
-                // (wait for any) rather than forwarding "" to the registry,
-                // matching how `tail`/`stop` normalize via `required_task_id`.
-                if let Some(task_id) = args
-                    .task_id
-                    .as_deref()
-                    .filter(|value| !value.trim().is_empty())
-                {
-                    let task_id = task_id.trim();
-                    if is_subagent_id(task_id) {
-                        ToolOutput::Text(
-                            self.wait_for_subagent(
-                                task_id,
-                                Duration::from_secs(wait_seconds.unwrap_or(1)),
-                            )
-                            .await?,
-                        )
-                    } else if is_terminal_id(task_id) {
-                        self.wait_for_terminal_wakeable(task_id, &args, context.as_ref())
-                            .await?
-                    } else {
-                        self.wait_for_background_wakeable(task_id, &args, context.as_ref())
-                            .await?
-                    }
-                } else {
-                    ToolOutput::Text(
-                        self.wait_for_any(Duration::from_secs(wait_seconds.unwrap_or(1)))
-                            .await,
-                    )
+                // Time spent waiting for background work is queue time, not tool
+                // work: the run is blocked on a process another task owns.
+                // Without this the wait lands inside the tool-active interval
+                // and queue time is indistinguishable from a slow or failed
+                // tool.
+                let wait = context.as_ref().and_then(|context| {
+                    context.begin_queue_wait(Some("tasks"), Some("waiting for background work"))
+                });
+                let outcome = self.wait_action(&args, context.as_ref()).await;
+                if let Some(context) = context.as_ref() {
+                    context.end_queue_wait(wait);
                 }
+                outcome?
             }
             TaskAction::Tail => {
                 let task_id = required_task_id(args.task_id.as_deref(), "tail")?;
@@ -243,6 +223,44 @@ impl TasksTool {
 
         Ok(output)
     }
+    /// The `wait` action's body, split out so the arm above can bracket it with
+    /// one queue-wait interval: the span has to close on the error path too.
+    async fn wait_action(
+        &self,
+        args: &TasksArgs,
+        context: Option<&ToolExecutionContext>,
+    ) -> Result<ToolOutput> {
+        let wait_seconds = args
+            .wait_seconds
+            .map(|seconds| seconds.min(MAX_WAIT_SECONDS));
+        // Treat an empty/whitespace task_id the same as an omitted one (wait
+        // for any) rather than forwarding "" to the registry, matching how
+        // `tail`/`stop` normalize via `required_task_id`.
+        if let Some(task_id) = args
+            .task_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            let task_id = task_id.trim();
+            return if is_subagent_id(task_id) {
+                Ok(ToolOutput::Text(
+                    self.wait_for_subagent(task_id, Duration::from_secs(wait_seconds.unwrap_or(1)))
+                        .await?,
+                ))
+            } else if is_terminal_id(task_id) {
+                self.wait_for_terminal_wakeable(task_id, args, context)
+                    .await
+            } else {
+                self.wait_for_background_wakeable(task_id, args, context)
+                    .await
+            };
+        }
+        Ok(ToolOutput::Text(
+            self.wait_for_any(Duration::from_secs(wait_seconds.unwrap_or(1)))
+                .await,
+        ))
+    }
+
     async fn list_all(&self) -> String {
         let bash_tasks = self.registry.list().await;
         let bash = format_task_list(&bash_tasks);
@@ -790,5 +808,57 @@ mod tests {
             ToolOutput::UntrustedContext { content, .. }
                 if content.contains("Status: stopped") && !content.contains("Output tail:")
         ));
+    }
+
+    #[tokio::test]
+    async fn waiting_for_background_work_is_recorded_as_queue_time() {
+        let ledger: crate::timing::SharedTimingLedger = std::sync::Arc::new(
+            crate::timing::TimingLedger::system(crate::timing::TimingPolicy::ActiveCompute),
+        );
+        let tool = TasksTool::new(Arc::new(BackgroundTaskRegistry::new()));
+        let context = crate::tool::ToolExecutionContext::new(
+            "call-wait".to_string(),
+            Arc::new(crate::output::StdoutSink),
+        )
+        .with_timing(ledger.clone());
+
+        tool.execute_with_context(
+            serde_json::json!({"action": "wait", "wait_seconds": 0}),
+            context,
+        )
+        .await
+        .expect("waiting with no tasks must succeed");
+
+        // A wait for background work has to land in the queue category: that is
+        // what makes it distinguishable from a slow or failed tool, and it must
+        // never be charged to the active-compute clock.
+        let snapshot = ledger.snapshot();
+        let queue = snapshot
+            .categories
+            .iter()
+            .find(|row| row.category == crate::timing::TimingCategory::Queue)
+            .expect("the wait must be recorded as queue time");
+        assert_eq!(queue.interval_count, 1);
+        assert_eq!(queue.open_count, 0);
+        assert_eq!(queue.latest_owner.as_deref(), Some("tasks"));
+        assert_eq!(snapshot.active_compute_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn waiting_without_a_run_ledger_records_nothing() {
+        let tool = TasksTool::new(Arc::new(BackgroundTaskRegistry::new()));
+        let context = crate::tool::ToolExecutionContext::new(
+            "call-wait".to_string(),
+            Arc::new(crate::output::StdoutSink),
+        );
+
+        // Runs without timing (evals, tests) must not fail or panic on the way
+        // through the same code path.
+        tool.execute_with_context(
+            serde_json::json!({"action": "wait", "wait_seconds": 0}),
+            context,
+        )
+        .await
+        .expect("waiting without a ledger must still succeed");
     }
 }

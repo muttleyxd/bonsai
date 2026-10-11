@@ -98,6 +98,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{UsageTotals, UsageTurn, WaitReason};
 use crate::diff::FileDiff;
 use crate::output::{SharedSink, ToolExecutionStatus};
+use crate::timing::{SharedTimingLedger, TimingCategory, TimingLane, TimingSpan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputTruncationContext {
@@ -1088,6 +1089,12 @@ pub struct ToolExecutionContext {
     /// It is a snapshot, not a shared reservation; callers must serialize
     /// delegated work whenever a cumulative cap is active.
     remaining_billed_tokens: Option<u64>,
+    /// The active run's timing ledger, when this call belongs to a timed run.
+    ///
+    /// Tools that block on something other than their own work — a background
+    /// task finishing, a terminal coming up — record that wait here, so it is
+    /// reported as queue time instead of inflating active tool work (#146).
+    timing: Option<SharedTimingLedger>,
     background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
 }
 
@@ -1100,6 +1107,7 @@ impl ToolExecutionContext {
             origin: None,
             cancellation_token: None,
             remaining_billed_tokens: None,
+            timing: None,
             background_wakes: None,
         }
     }
@@ -1120,6 +1128,34 @@ impl ToolExecutionContext {
     pub(crate) fn with_remaining_billed_tokens(mut self, remaining: Option<u64>) -> Self {
         self.remaining_billed_tokens = remaining;
         self
+    }
+
+    #[must_use]
+    pub(crate) fn with_timing(mut self, timing: SharedTimingLedger) -> Self {
+        self.timing = Some(timing);
+        self
+    }
+
+    /// Open a queue wait this tool owns, returning a handle to close it.
+    ///
+    /// `None` when the run records no timing, so a caller can bracket a wait
+    /// without branching on whether a ledger exists.
+    pub(crate) fn begin_queue_wait(
+        &self,
+        owner: Option<&str>,
+        reason: Option<&str>,
+    ) -> Option<TimingSpan> {
+        self.timing
+            .as_ref()
+            .map(|timing| timing.begin(TimingCategory::Queue, TimingLane::Parent, owner, reason))
+    }
+
+    /// Close a wait opened by [`Self::begin_queue_wait`]. Closing is idempotent,
+    /// so a wait closed on both the success and the error path counts once.
+    pub(crate) fn end_queue_wait(&self, span: Option<TimingSpan>) {
+        if let (Some(timing), Some(span)) = (self.timing.as_ref(), span) {
+            timing.end(span);
+        }
     }
 
     #[must_use]
